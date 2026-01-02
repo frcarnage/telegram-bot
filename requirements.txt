@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+yt-dlp==2023.11.16
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
+requests==2.31.0
