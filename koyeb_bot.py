@@ -2116,7 +2116,7 @@ def process_webhook_update(data):
                                 target_id = int(parts[1])
                                 reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
                                 if db.remove_premium(target_id, user_id, reason):
-                                    send_telegram_message(user_id, f"✅ Premium removed from user <code>{target_id}</code>.", parse_mode='HTML")
+                                    send_telegram_message(user_id, f"✅ Premium removed from user <code>{target_id}</code>.", parse_mode='HTML')
                                 else:
                                     send_telegram_message(user_id, f"❌ Failed to remove premium from user <code>{target_id}</code>.", parse_mode='HTML')
                             except ValueError:
