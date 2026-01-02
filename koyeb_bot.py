@@ -47,7 +47,7 @@ PREMIUM_MAX_SIZE = 200 * 1024 * 1024  # 200MB for premium
 PORT = int(os.environ.get("PORT", 8080))
 
 # Get Koyeb URL
-KOYEB_APP_NAME = os.environ.get("KOYEB_APP_NAME", "encouraging-di-1carnage1-6226074c")
+KOYEB_APP_NAME = os.environ.get("KOYEB_APP_NAME", "https://encouraging-di-1carnage1-6226074c.koyeb.app")
 KOYEB_ORG = os.environ.get("KOYEB_ORG", "koyeb")
 WEBHOOK_URL = f"https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/webhook"
 
