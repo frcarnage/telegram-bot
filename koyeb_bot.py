@@ -44,12 +44,17 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB Telegram limit
 RATE_LIMIT = 10  # Downloads per hour for free users
 PREMIUM_RATE_LIMIT = 50  # Downloads per hour for premium users
 PREMIUM_MAX_SIZE = 200 * 1024 * 1024  # 200MB for premium
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 8000))  # Koyeb uses 8000, not 8080
 
-# Get Koyeb URL
-KOYEB_APP_NAME = os.environ.get("KOYEB_APP_NAME", "https://encouraging-di-1carnage1-6226074c.koyeb.app")
-KOYEB_ORG = os.environ.get("KOYEB_ORG", "koyeb")
-WEBHOOK_URL = f"https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/webhook"
+# Get Koyeb URL from environment
+KOYEB_APP_URL = os.environ.get("KOYEB_APP_URL", "https://encouraging-di-1carnage1-6226074c.koyeb.app")
+WEBHOOK_URL = f"{KOYEB_APP_URL}/webhook"
+
+print(f"🔧 Configuration:")
+print(f"📱 Bot Token: {TOKEN[:10]}...")
+print(f"🌐 Webhook URL: {WEBHOOK_URL}")
+print(f"🔌 Port: {PORT}")
+print(f"👑 Admin IDs: {ADMIN_IDS}")
 
 # ========== LOGGING SETUP ==========
 logging.basicConfig(
@@ -57,7 +62,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('bot.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -819,54 +823,6 @@ class UniversalDownloader:
         except Exception as e:
             logger.error(f"Error compressing video: {e}")
             return None, 0
-    
-    @staticmethod
-    def extract_subtitles(video_url):
-        """Extract subtitles from video"""
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'skip_download': True,
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'subtitleslangs': ['en', 'all'],
-                'outtmpl': 'temp_subtitle'
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-                
-                # Look for subtitle files
-                subtitle_files = []
-                for lang in ['en', '']:
-                    for ext in ['vtt', 'srt', 'ass']:
-                        filename = f'temp_subtitle.{lang}.{ext}'
-                        if os.path.exists(filename):
-                            with open(filename, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            subtitle_files.append({
-                                'language': lang or 'auto',
-                                'format': ext,
-                                'content': content
-                            })
-                            os.unlink(filename)
-                
-                if subtitle_files:
-                    # Create zip file
-                    zip_buffer = io.BytesIO()
-                    with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
-                        for sub in subtitle_files:
-                            filename = f'subtitles_{sub["language"]}.{sub["format"]}'
-                            zip_file.writestr(filename, sub['content'])
-                    
-                    zip_buffer.seek(0)
-                    return zip_buffer, len(zip_buffer.getvalue())
-            
-            return None, 0
-            
-        except Exception as e:
-            logger.error(f"Error extracting subtitles: {e}")
-            return None, 0
 
 # ========== TELEGRAM BOT FUNCTIONS ==========
 def send_telegram_message(chat_id, text, parse_mode='HTML', reply_markup=None):
@@ -884,6 +840,7 @@ def send_telegram_message(chat_id, text, parse_mode='HTML', reply_markup=None):
             payload['reply_markup'] = reply_markup
         
         response = http_requests.post(url, json=payload, timeout=10)
+        logger.info(f"📤 Sent message to {chat_id}, status: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
         logger.error(f"Error sending message: {e}")
@@ -907,31 +864,10 @@ def send_telegram_video(chat_id, video_buffer, caption, filename):
         }
         
         response = http_requests.post(url, data=data, files=files, timeout=60)
+        logger.info(f"📤 Sent video to {chat_id}, status: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
         logger.error(f"Error sending video: {e}")
-        return False
-
-def send_telegram_document(chat_id, document_buffer, caption, filename):
-    """Send document via Telegram Bot API"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
-        
-        # Prepare files
-        document_buffer.seek(0)
-        files = {'document': (filename, document_buffer)}
-        
-        # Prepare data
-        data = {
-            'chat_id': chat_id,
-            'caption': caption,
-            'parse_mode': 'HTML'
-        }
-        
-        response = http_requests.post(url, data=data, files=files, timeout=60)
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error sending document: {e}")
         return False
 
 def edit_telegram_message(chat_id, message_id, text, parse_mode='HTML'):
@@ -950,21 +886,6 @@ def edit_telegram_message(chat_id, message_id, text, parse_mode='HTML'):
         return response.status_code == 200
     except Exception as e:
         logger.error(f"Error editing message: {e}")
-        return False
-
-def delete_telegram_message(chat_id, message_id):
-    """Delete a Telegram message"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/deleteMessage"
-        payload = {
-            'chat_id': chat_id,
-            'message_id': message_id
-        }
-        
-        response = http_requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
         return False
 
 def get_bot_info():
@@ -996,6 +917,8 @@ def set_webhook():
             data = response.json()
             logger.info(f"✅ Webhook set: {data}")
             return True
+        else:
+            logger.error(f"❌ Failed to set webhook: {response.status_code} - {response.text}")
         return False
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
@@ -1037,7 +960,6 @@ def handle_start(user_id, username, first_name, message_id):
 • 200MB file size limit
 • 50 downloads/hour
 • Video compression
-• Subtitle extraction
 • Priority processing
 
 💰 <b>Premium Subscription:</b>
@@ -1133,12 +1055,6 @@ Download videos from multiple platforms in best quality.
 • TikTok: <code>https://tiktok.com/@user/video/123456789</code>
 • <b>Any valid video link!</b>
 
-🛠️ <b>Premium Tools:</b>
-• Video Compression (reduce file size)
-• Subtitle extraction
-• Batch downloading
-• Custom quality selection
-
 ⚠️ <b>Limitations:</b>
 • Free: Max <b>50MB</b> file size
 • Free: <b>{RATE_LIMIT} downloads/hour</b>
@@ -1168,7 +1084,6 @@ Download videos from multiple platforms in best quality.
 /history - Your download history
 /premium - Premium subscription info
 /features - All bot features
-/tools - Premium tools menu
 
 🛡 <b>Privacy:</b>
 • Videos are never stored on our servers
@@ -1266,281 +1181,11 @@ def handle_stats(user_id, first_name):
             [
                 {'text': '📋 History', 'callback_data': 'history'},
                 {'text': '⭐ Premium', 'callback_data': 'premium_info'}
-            ],
-            [
-                {'text': '🏆 Leaderboard', 'callback_data': 'leaderboard'},
-                {'text': '📈 Platform Stats', 'callback_data': 'platform_stats'}
             ]
         ]
     }
     
     return send_telegram_message(user_id, stats_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_history(user_id, page=1):
-    """Handle /history command"""
-    history = db.get_download_history(user_id, limit=50)
-    
-    if not history:
-        return send_telegram_message(user_id, "📭 <b>No download history found.</b>\n\nStart by sending me a video link!", parse_mode='HTML')
-    
-    # Paginate
-    items_per_page = 10
-    total_pages = (len(history) + items_per_page - 1) // items_per_page
-    start_idx = (page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
-    page_items = history[start_idx:end_idx]
-    
-    history_text = f"""
-<b>📋 DOWNLOAD HISTORY</b>
-
-📊 <b>Total Downloads:</b> {len(history)}
-📄 <b>Page:</b> {page}/{total_pages}
-
-"""
-    
-    for idx, item in enumerate(page_items, start=start_idx + 1):
-        item_id, platform, url, title, thumbnail, download_date, file_size, quality = item
-        
-        # Format date
-        try:
-            dt = datetime.strptime(download_date, '%Y-%m-%d %H:%M:%S')
-            date_str = dt.strftime('%b %d, %H:%M')
-        except:
-            date_str = download_date
-        
-        # Truncate title
-        display_title = title[:30] + "..." if len(title) > 30 else title
-        
-        # Format size
-        size_mb = file_size / (1024 * 1024) if file_size else 0
-        
-        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-        
-        history_text += f"""<b>{idx}.</b> {icon} <b>{platform.upper()}</b>
-├─ <b>Title:</b> {display_title}
-├─ <b>Quality:</b> {quality}
-├─ <b>Size:</b> {size_mb:.1f}MB
-├─ <b>Date:</b> {date_str}
-└─ <b>Link:</b> <code>{url[:30]}...</code>
-
-"""
-    
-    keyboard_buttons = []
-    
-    # Navigation buttons
-    if page > 1:
-        keyboard_buttons.append({'text': '⬅️ Previous', 'callback_data': f'history_{page-1}'})
-    
-    if page < total_pages:
-        keyboard_buttons.append({'text': 'Next ➡️', 'callback_data': f'history_{page+1}'})
-    
-    # Other buttons
-    other_buttons = [
-        {'text': '🗑️ Clear History', 'callback_data': 'clear_history'},
-        {'text': '📊 Stats', 'callback_data': 'my_stats'},
-        {'text': '🚀 New Download', 'switch_inline_query_current_chat': ''}
-    ]
-    
-    keyboard = {
-        'inline_keyboard': [keyboard_buttons] if keyboard_buttons else [] + [other_buttons]
-    }
-    
-    return send_telegram_message(user_id, history_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_premium_info(user_id):
-    """Handle /premium command"""
-    is_premium = db.is_premium_user(user_id)
-    
-    premium_text = f"""
-<b>⭐ PREMIUM SUBSCRIPTION</b>
-
-{'🎉 <b>YOU ARE A PREMIUM USER!</b> 🎉' if is_premium else '🆓 <b>FREE ACCOUNT</b>'}
-{'<i>Thank you for supporting us!</i>' if is_premium else ''}
-
-<b>Premium Features:</b>
-✅ <b>200MB</b> file size limit (Free: 50MB)
-✅ <b>{PREMIUM_RATE_LIMIT}</b> downloads/hour (Free: {RATE_LIMIT})
-✅ <b>Video Compression</b> tool
-✅ <b>Subtitle Extraction</b>
-✅ <b>Priority Processing</b>
-✅ <b>Custom Quality Selection</b>
-✅ <b>Batch Downloading</b>
-✅ <b>Priority Support</b>
-
-<b>Pricing:</b>
-💰 <b>1 Month:</b> Contact Admin
-💰 <b>3 Months:</b> Contact Admin
-💰 <b>6 Months:</b> Contact Admin
-💰 <b>1 Year:</b> Contact Admin
-
-<b>How to Upgrade:</b>
-1. Contact admin @Tg_AssistBot
-2. Make payment
-3. Admin will activate premium
-4. Enjoy all features!
-
-<b>Your Status:</b>
-"""
-    
-    if is_premium:
-        stats = db.get_user_stats(user_id)
-        if stats['premium_until']:
-            try:
-                until_dt = datetime.strptime(stats['premium_until'], '%Y-%m-%d %H:%M:%S')
-                days_left = (until_dt - datetime.now()).days
-                premium_text += f"✅ <b>Active until:</b> {until_dt.strftime('%b %d, %Y')}\n"
-                premium_text += f"⏳ <b>Days remaining:</b> {days_left}\n"
-            except:
-                premium_text += "✅ <b>Premium Active</b>\n"
-    else:
-        premium_text += "❌ <b>Not Premium</b>\n💡 <i>Contact admin to upgrade!</i>\n"
-    
-    premium_text += f"""
-📞 <b>Contact Admin:</b> @Tg_AssistBot
-
-<i>All payments are secure and one-time only.
-No automatic renewals.</i>
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'},
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
-            ],
-            [
-                {'text': '🔄 Refresh Status', 'callback_data': 'refresh_premium'},
-                {'text': '🚀 Try Download', 'switch_inline_query_current_chat': ''}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, premium_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_features(user_id):
-    """Handle /features command"""
-    features_text = """
-<b>🛠️ ALL FEATURES</b>
-
-<b>📥 Core Features:</b>
-✅ Download from 15+ platforms
-✅ Best quality auto-selection
-✅ No storage on servers
-✅ Fast processing
-✅ Free forever
-
-<b>⭐ Premium Features:</b>
-✅ 200MB file size limit
-✅ 50 downloads/hour
-✅ Video compression
-✅ Subtitle extraction
-✅ Custom quality selection
-✅ Priority processing
-✅ Batch downloading
-✅ Priority support
-
-<b>🔄 Processing Features:</b>
-✅ Progress bar display
-✅ Real-time status updates
-✅ Automatic format detection
-✅ Multi-threaded downloads
-✅ Error recovery
-
-<b>📊 Analytics Features:</b>
-✅ Download history
-✅ User statistics
-✅ Platform usage stats
-✅ Hourly/daily/weekly reports
-✅ Leaderboards
-
-<b>🔧 Admin Features:</b>
-✅ User management
-✅ Premium management
-✅ Bot statistics
-✅ Broadcast messages
-✅ Ad management
-
-<b>🛡️ Security Features:</b>
-✅ Rate limiting
-✅ Ban system
-✅ Link validation
-✅ File size limits
-✅ Privacy protection
-
-<b>🌐 Platform Support:</b>
-✅ YouTube, Instagram, TikTok
-✅ Pinterest, Terabox, Twitter
-✅ Facebook, Reddit, Likee
-✅ Dailymotion, Vimeo, Twitch
-✅ Bilibili, Rutube, and more!
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '⭐ Go Premium', 'callback_data': 'premium_info'},
-                {'text': '📖 Help Guide', 'callback_data': 'help_menu'}
-            ],
-            [
-                {'text': '🚀 Start Downloading', 'switch_inline_query_current_chat': ''},
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, features_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_tools_menu(user_id):
-    """Handle /tools command - Show premium tools menu"""
-    is_premium = db.is_premium_user(user_id)
-    
-    if not is_premium:
-        return send_telegram_message(user_id, "❌ <b>Premium Tools</b>\n\nThis feature is available only for premium users.\n\nContact admin @Tg_AssistBot to upgrade to premium!", parse_mode='HTML')
-    
-    tools_text = """
-<b>🛠️ PREMIUM TOOLS</b>
-
-<b>Available Tools:</b>
-
-1. <b>🎞️ Video Compression</b>
-   Reduce video file size while maintaining quality
-   • Options: High, Medium, Low compression
-   • Maintains original resolution
-   • Fast processing
-
-2. <b>📝 Subtitle Extraction</b>
-   Extract subtitles from videos
-   • Multiple formats: SRT, VTT, ASS
-   • Auto language detection
-   • Batch extraction
-
-<b>How to use:</b>
-1. First download a video
-2. Use the tools button below the video
-3. Select desired tool
-4. Process and receive result
-
-<i>All tools are available only for premium users.</i>
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '🎞️ Compress Video', 'callback_data': 'compress_info'},
-                {'text': '📝 Extract Subtitles', 'callback_data': 'subtitle_info'}
-            ],
-            [
-                {'text': '📥 Download Video', 'switch_inline_query_current_chat': ''},
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
-            ],
-            [
-                {'text': '⭐ Premium Info', 'callback_data': 'premium_info'},
-                {'text': '📖 Help Guide', 'callback_data': 'help_menu'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, tools_text, parse_mode='HTML', reply_markup=keyboard)
 
 def handle_ping(user_id):
     """Handle /ping command"""
@@ -1557,10 +1202,10 @@ def handle_ping(user_id):
 ⭐ <b>Premium Users:</b> <b>{bot_stats.get('premium_users', 0)}</b>
 
 🔗 <b>Health Endpoints:</b>
-• https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/health
-• https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/ping
-• https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/ping1
-• https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/ping2
+• https://encouraging-di-1carnage1-6226074c.koyeb.app/health
+• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping
+• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping1
+• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping2
 
 🕒 <b>Last Check:</b> {datetime.now().strftime('%H:%M:%S')}
 📍 <b>Server:</b> Global CDN
@@ -1576,7 +1221,6 @@ def handle_admin(user_id):
         return send_telegram_message(user_id, "❌ <b>Admin only command.</b>", parse_mode='HTML')
     
     bot_stats = db.get_bot_stats()
-    premium_users = db.get_premium_users()
     
     admin_text = f"""
 <b>👑 ADMIN PANEL</b>
@@ -1589,16 +1233,6 @@ def handle_admin(user_id):
 • Banned Users: <b>{bot_stats.get('banned_users', 0)}</b>
 • Premium Users: <b>{bot_stats.get('premium_users', 0)}</b>
 
-🔗 <b>Platform Usage:</b>
-"""
-    
-    # Add platform stats
-    for platform_stat in bot_stats.get('platform_stats', []):
-        platform, count = platform_stat
-        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-        admin_text += f"• {icon} {platform.title()}: <b>{count}</b>\n"
-    
-    admin_text += f"""
 🌐 <b>System Info:</b>
 • Webhook: {WEBHOOK_URL}
 • Bot: @{BOT_USERNAME}
@@ -1613,19 +1247,12 @@ def handle_admin(user_id):
 
 <b>💰 Premium Management:</b>
 • <code>/premiumusers</code> - List premium users
-• <code>/premiumstats</code> - Premium statistics
 
 <b>📢 Broadcast:</b>
 • <code>/broadcast [message]</code> - Send to all users
 
 <b>📊 Statistics:</b>
 • <code>/botstats</code> - Detailed statistics
-
-<b>📢 Ad Management:</b>
-• <code>/createad [type] [content] [url]</code>
-• <code>/listads</code> - List all ads
-• <code>/togglead [ad_id]</code> - Toggle ad status
-• <code>/deletead [ad_id]</code> - Delete ad
 
 🕒 <b>Last Updated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
@@ -1635,10 +1262,6 @@ def handle_admin(user_id):
             [
                 {'text': '👥 User List', 'callback_data': 'admin_users'},
                 {'text': '⭐ Premium Users', 'callback_data': 'admin_premium_users'}
-            ],
-            [
-                {'text': '📢 Ads', 'callback_data': 'admin_ads'},
-                {'text': '📊 Stats', 'callback_data': 'admin_stats'}
             ],
             [
                 {'text': '🔄 Refresh', 'callback_data': 'admin_refresh'},
@@ -1682,7 +1305,6 @@ def handle_video_download(user_id, username, first_name, text, message_id):
     # Send processing message with progress bar
     status_msg = f"{icon} <b>Processing {platform.upper()} link...</b>\n\n"
     status_msg += "⏳ Please wait while I analyze the video...\n"
-    status_msg += "▰▱▱▱▱▱▱▱▱▱ 10%"
     
     send_telegram_message(user_id, status_msg, parse_mode='HTML')
     
@@ -1695,7 +1317,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
     """Process video download in background thread"""
     try:
         # Update progress
-        edit_telegram_message(user_id, message_id + 1, f"{icon} <b>{platform.upper()} DETECTED</b>\n\n🔍 Analyzing video information...\n▰▰▱▱▱▱▱▱▱▱ 20%")
+        edit_telegram_message(user_id, message_id + 1, f"{icon} <b>{platform.upper()} DETECTED</b>\n\n🔍 Analyzing video information...")
         
         # Get video information
         video_info = UniversalDownloader.get_video_info(url, is_premium)
@@ -1727,19 +1349,12 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
 👁 <b>Views:</b> {video_info.get('view_count', 'N/A')}
 
 📥 <b>Starting download...</b>
-▰▰▰▱▱▱▱▱▱▱ 30%
 """
         
         edit_telegram_message(user_id, message_id + 1, info_text)
         
-        # Define progress callback
-        def progress_callback(percent):
-            progress_bars = int(percent / 10)
-            progress_text = f"📥 <b>Downloading...</b>\n\n{'▰' * progress_bars}{'▱' * (10 - progress_bars)} {percent}%"
-            edit_telegram_message(user_id, message_id + 1, info_text.split('📥')[0] + progress_text)
-        
         # Download video
-        video_buffer, downloaded_size = UniversalDownloader.download_video(video_info['url'], progress_callback)
+        video_buffer, downloaded_size = UniversalDownloader.download_video(video_info['url'])
         
         if not video_buffer:
             edit_telegram_message(user_id, message_id + 1, "❌ <b>Download Failed</b>\n\nCould not download the video.\nPossible reasons:\n• Network error\n• Server timeout\n• Video unavailable\n\nPlease try again or use a different link.")
@@ -1747,22 +1362,8 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
             db.record_download(user_id, platform, url, video_info['title'], 0, video_info.get('quality', 'unknown'), False)
             return
         
-        # Check if compression needed (for free users)
-        compressed = False
-        if not is_premium and downloaded_size > MAX_FILE_SIZE:
-            # Compress video for free users
-            edit_telegram_message(user_id, message_id + 1, "🔄 <b>Compressing video...</b>\n\nOptimizing for Telegram...\n▰▰▰▰▰▰▰▱▱▱ 70%")
-            
-            compressed_buffer, compressed_size = UniversalDownloader.compress_video(video_buffer, 'medium')
-            
-            if compressed_buffer and compressed_size <= MAX_FILE_SIZE:
-                video_buffer.close()
-                video_buffer = compressed_buffer
-                downloaded_size = compressed_size
-                compressed = True
-        
         # Upload to Telegram
-        edit_telegram_message(user_id, message_id + 1, "📤 <b>Uploading to Telegram...</b>\n\nFinal step...\n▰▰▰▰▰▰▰▰▰▱ 90%")
+        edit_telegram_message(user_id, message_id + 1, "📤 <b>Uploading to Telegram...</b>\n\nFinal step...")
         
         # Prepare caption
         file_size_mb = downloaded_size / (1024 * 1024)
@@ -1776,27 +1377,10 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
 💾 <b>Size:</b> {file_size_mb:.1f}MB
 ⏱ <b>Duration:</b> {duration_str}
 🎯 <b>Quality:</b> {video_info.get('quality', 'best')}
-{'🔧 <b>Compressed:</b> Yes' if compressed else ''}
 {'⭐ <b>Premium:</b> Yes' if is_premium else ''}
 
 🤖 Downloaded via @{BOT_USERNAME}
 """
-        
-        # Add tools buttons for premium users
-        reply_markup = None
-        if is_premium:
-            reply_markup = {
-                'inline_keyboard': [
-                    [
-                        {'text': '🎞️ Compress', 'callback_data': f'compress_{url[:20]}'},
-                        {'text': '📝 Subtitles', 'callback_data': f'subtitle_{url[:20]}'}
-                    ],
-                    [
-                        {'text': '⭐ Rate', 'callback_data': 'rate_bot'},
-                        {'text': '📊 Stats', 'callback_data': 'my_stats'}
-                    ]
-                ]
-            }
         
         # Send video
         filename = f"{video_info['title'][:50]}.mp4".replace('/', '_').replace('\\', '_')
@@ -1804,7 +1388,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
         
         if success:
             # Record successful download
-            db.record_download(user_id, platform, url, video_info['title'], downloaded_size, video_info.get('quality', 'best'), True, compressed)
+            db.record_download(user_id, platform, url, video_info['title'], downloaded_size, video_info.get('quality', 'best'), True, False)
             
             # Update user
             db.add_user(user_id, username, first_name)
@@ -1815,8 +1399,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
             completion_text += f"📥 <b>Download Details:</b>\n"
             completion_text += f"• Platform: {platform.upper()}\n"
             completion_text += f"• Size: {file_size_mb:.1f}MB\n"
-            completion_text += f"• Status: ✅ Complete\n"
-            completion_text += f"{'• Compressed: Yes' if compressed else ''}\n\n"
+            completion_text += f"• Status: ✅ Complete\n\n"
             completion_text += f"📊 <b>Your Updated Stats:</b>\n"
             completion_text += f"• This Hour: {new_stats['hourly']}/{new_stats['rate_limit']}\n"
             completion_text += f"• Remaining: {new_stats['remaining']} downloads\n\n"
@@ -1902,7 +1485,7 @@ def stats():
         'uptime': int(time.time() - start_time)
     })
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
     """Telegram webhook endpoint"""
     try:
@@ -1910,12 +1493,15 @@ def webhook():
             data = request.get_json()
             
             # Log the update
-            logger.debug(f"Received update: {data}")
+            logger.info(f"📩 Received update from Telegram: {data}")
             
             # Process update in background thread
             Thread(target=process_webhook_update, args=(data,)).start()
             
             return 'OK'
+        else:
+            # GET request - for verification
+            return jsonify({'status': 'webhook_active', 'bot': BOT_USERNAME})
     except Exception as e:
         logger.error(f"Webhook error: {e}")
     
@@ -1924,6 +1510,8 @@ def webhook():
 def process_webhook_update(data):
     """Process webhook update"""
     try:
+        logger.info(f"🔄 Processing update: {data}")
+        
         # Check if it's a message
         if 'message' in data:
             message = data['message']
@@ -1934,9 +1522,12 @@ def process_webhook_update(data):
             message_id = message.get('message_id')
             text = message.get('text', '').strip()
             
+            logger.info(f"📝 Message from {user_id} ({first_name}): {text[:50]}")
+            
             # Handle commands
             if text.startswith('/'):
                 command = text.split()[0].lower()
+                logger.info(f"🔧 Processing command: {command}")
                 
                 if command == '/start':
                     handle_start(user_id, username, first_name, message_id)
@@ -1944,14 +1535,6 @@ def process_webhook_update(data):
                     handle_help(user_id)
                 elif command == '/stats':
                     handle_stats(user_id, first_name)
-                elif command == '/history':
-                    handle_history(user_id)
-                elif command == '/premium':
-                    handle_premium_info(user_id)
-                elif command == '/features':
-                    handle_features(user_id)
-                elif command == '/tools':
-                    handle_tools_menu(user_id)
                 elif command == '/ping':
                     handle_ping(user_id)
                 elif command == '/admin':
@@ -1966,17 +1549,7 @@ def process_webhook_update(data):
                             status = "🔴 BANNED" if banned else ("⭐ PREMIUM" if is_premium else "🟢 FREE")
                             user_list += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code> | {status}\n  📥 {downloads} DLs\n\n"
                         
-                        # Add inline buttons for user management
-                        keyboard = {
-                            'inline_keyboard': [
-                                [
-                                    {'text': '🔄 Refresh', 'callback_data': 'admin_users'},
-                                    {'text': '⭐ Premium Users', 'callback_data': 'admin_premium_users'}
-                                ]
-                            ]
-                        }
-                        send_telegram_message(user_id, user_list, parse_mode='HTML', reply_markup=keyboard)
-                
+                        send_telegram_message(user_id, user_list, parse_mode='HTML')
                 elif command.startswith('/addpremium'):
                     # Handle add premium command
                     if user_id in ADMIN_IDS:
@@ -1994,7 +1567,6 @@ def process_webhook_update(data):
                                 send_telegram_message(user_id, "❌ Invalid format. Use: <code>/addpremium [user_id] [days]</code>", parse_mode='HTML')
                         else:
                             send_telegram_message(user_id, "❌ Format: <code>/addpremium [user_id] [days]</code>", parse_mode='HTML')
-                
                 elif command.startswith('/removepremium'):
                     # Handle remove premium command
                     if user_id in ADMIN_IDS:
@@ -2011,7 +1583,6 @@ def process_webhook_update(data):
                                 send_telegram_message(user_id, "❌ Invalid user ID.", parse_mode='HTML')
                         else:
                             send_telegram_message(user_id, "❌ Format: <code>/removepremium [user_id] [reason]</code>", parse_mode='HTML')
-                
                 elif command.startswith('/premiumusers'):
                     # Handle premium users command
                     if user_id in ADMIN_IDS:
@@ -2029,19 +1600,9 @@ def process_webhook_update(data):
                                 
                                 premium_text += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code>\n  📅 {status}\n  📥 {downloads} DLs\n\n"
                             
-                            # Add inline buttons for management
-                            keyboard = {
-                                'inline_keyboard': [
-                                    [
-                                        {'text': '🔄 Refresh', 'callback_data': 'admin_premium_users'},
-                                        {'text': '📊 All Users', 'callback_data': 'admin_users'}
-                                    ]
-                                ]
-                            }
-                            send_telegram_message(user_id, premium_text, parse_mode='HTML', reply_markup=keyboard)
+                            send_telegram_message(user_id, premium_text, parse_mode='HTML')
                         else:
                             send_telegram_message(user_id, "❌ No premium users found.", parse_mode='HTML')
-                
                 elif command.startswith('/ban'):
                     # Handle ban command
                     if user_id in ADMIN_IDS:
@@ -2053,7 +1614,6 @@ def process_webhook_update(data):
                                 send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been banned.", parse_mode='HTML')
                             else:
                                 send_telegram_message(user_id, f"❌ Failed to ban user <code>{target_id}</code>.", parse_mode='HTML')
-                
                 elif command.startswith('/unban'):
                     # Handle unban command
                     if user_id in ADMIN_IDS:
@@ -2062,10 +1622,9 @@ def process_webhook_update(data):
                             target_id = int(parts[1])
                             reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
                             if db.unban_user(target_id, user_id, reason):
-                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been unbanned.", parse_mode='HTML')
+                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been unbanned.", parse_mode='HTML")
                             else:
                                 send_telegram_message(user_id, f"❌ Failed to unban user <code>{target_id}</code>.", parse_mode='HTML')
-                
                 elif command.startswith('/broadcast'):
                     # Handle broadcast command
                     if user_id in ADMIN_IDS:
@@ -2085,7 +1644,6 @@ def process_webhook_update(data):
                                     failed += 1
                             
                             send_telegram_message(user_id, f"✅ Broadcast complete!\n\n📊 Results:\n• Sent: {sent}\n• Failed: {failed}\n• Total: {len(users)}", parse_mode='HTML')
-                
                 elif command == '/botstats':
                     # Handle botstats command
                     if user_id in ADMIN_IDS:
@@ -2112,87 +1670,6 @@ def process_webhook_update(data):
                         
                         stats_text += f"\n🕒 <b>Last Updated:</b> {datetime.now().strftime('%H:%M:%S')}"
                         send_telegram_message(user_id, stats_text, parse_mode='HTML')
-                
-                elif command.startswith('/createad'):
-                    # Handle create ad command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split(' ', 3)
-                        if len(parts) >= 4:
-                            ad_type = parts[1]
-                            content = parts[2]
-                            url = parts[3]
-                            ad_id = db.create_ad(ad_type, content, url)
-                            if ad_id:
-                                send_telegram_message(user_id, f"✅ Ad created successfully!\n\nID: <code>{ad_id}</code>\nType: {ad_type}\nContent: {content}\nURL: {url}", parse_mode='HTML')
-                            else:
-                                send_telegram_message(user_id, "❌ Failed to create ad.", parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ Format: <code>/createad [type] [content] [url]</code>\n\nTypes: banner, sponsored, partner", parse_mode='HTML')
-                
-                elif command.startswith('/listads'):
-                    # Handle list ads command
-                    if user_id in ADMIN_IDS:
-                        ads = db.get_ads(active_only=False)
-                        if ads:
-                            ads_text = "📢 <b>ALL ADS</b>\n\n"
-                            for ad in ads:
-                                ad_id, ad_type, content, url, impressions, clicks, is_active, created_at = ad
-                                status = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
-                                ads_text += f"<b>ID:</b> <code>{ad_id}</code>\n"
-                                ads_text += f"<b>Type:</b> {ad_type}\n"
-                                ads_text += f"<b>Status:</b> {status}\n"
-                                ads_text += f"<b>Content:</b> {content[:50]}...\n"
-                                ads_text += f"<b>Impressions:</b> {impressions}\n"
-                                ads_text += f"<b>Clicks:</b> {clicks}\n"
-                                ads_text += f"<b>Created:</b> {created_at}\n\n"
-                            
-                            # Add inline buttons for management
-                            keyboard = {
-                                'inline_keyboard': [
-                                    [
-                                        {'text': '🔄 Refresh', 'callback_data': 'admin_ads'},
-                                        {'text': '➕ New Ad', 'switch_inline_query_current_chat': '/createad '}
-                                    ]
-                                ]
-                            }
-                            send_telegram_message(user_id, ads_text, parse_mode='HTML', reply_markup=keyboard)
-                        else:
-                            send_telegram_message(user_id, "❌ No ads found.", parse_mode='HTML')
-                
-                elif command.startswith('/togglead'):
-                    # Handle toggle ad command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) >= 3:
-                            try:
-                                ad_id = int(parts[1])
-                                active = parts[2].lower() in ['true', '1', 'yes', 'on']
-                                if db.toggle_ad(ad_id, active):
-                                    status = "activated" if active else "deactivated"
-                                    send_telegram_message(user_id, f"✅ Ad <code>{ad_id}</code> has been {status}.", parse_mode='HTML')
-                                else:
-                                    send_telegram_message(user_id, f"❌ Failed to toggle ad <code>{ad_id}</code>.", parse_mode='HTML')
-                            except ValueError:
-                                send_telegram_message(user_id, "❌ Invalid ad ID.", parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ Format: <code>/togglead [ad_id] [true/false]</code>", parse_mode='HTML')
-                
-                elif command.startswith('/deletead'):
-                    # Handle delete ad command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) >= 2:
-                            try:
-                                ad_id = int(parts[1])
-                                if db.delete_ad(ad_id):
-                                    send_telegram_message(user_id, f"✅ Ad <code>{ad_id}</code> has been deleted.", parse_mode='HTML')
-                                else:
-                                    send_telegram_message(user_id, f"❌ Failed to delete ad <code>{ad_id}</code>.", parse_mode='HTML')
-                            except ValueError:
-                                send_telegram_message(user_id, "❌ Invalid ad ID.", parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ Format: <code>/deletead [ad_id]</code>", parse_mode='HTML')
-                
                 else:
                     # Unknown command
                     handle_help(user_id)
@@ -2208,6 +1685,8 @@ def process_webhook_update(data):
             data_str = callback.get('data', '')
             message_id = callback['message']['message_id']
             
+            logger.info(f"🔘 Callback query from {user_id}: {data_str}")
+            
             # Answer callback query
             answer_url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
             http_requests.post(answer_url, json={'callback_query_id': query_id})
@@ -2217,26 +1696,6 @@ def process_webhook_update(data):
                 handle_stats(user_id, callback['from']['first_name'])
             elif data_str == 'refresh_stats':
                 handle_stats(user_id, callback['from']['first_name'])
-            elif data_str == 'history':
-                handle_history(user_id)
-            elif data_str.startswith('history_'):
-                try:
-                    page = int(data_str.split('_')[1])
-                    handle_history(user_id, page)
-                except:
-                    handle_history(user_id)
-            elif data_str == 'clear_history':
-                send_telegram_message(user_id, "🗑️ <b>Clear History</b>\n\nThis feature is under development. Contact admin for assistance.", parse_mode='HTML')
-            elif data_str == 'premium_info':
-                handle_premium_info(user_id)
-            elif data_str == 'refresh_premium':
-                handle_premium_info(user_id)
-            elif data_str == 'tools_menu':
-                handle_tools_menu(user_id)
-            elif data_str == 'compress_info':
-                send_telegram_message(user_id, "🎞️ <b>Video Compression</b>\n\nThis tool reduces video file size while maintaining quality.\n\nTo use:\n1. Download a video first\n2. Click the 'Compress' button below the video\n3. Select compression level\n4. Wait for processing\n\n<i>Premium feature only</i>", parse_mode='HTML')
-            elif data_str == 'subtitle_info':
-                send_telegram_message(user_id, "📝 <b>Subtitle Extraction</b>\n\nExtract subtitles from videos in multiple formats.\n\nTo use:\n1. Download a video first\n2. Click the 'Subtitles' button below the video\n3. Select language preference\n4. Download subtitle files\n\n<i>Premium feature only</i>", parse_mode='HTML')
             elif data_str == 'help_menu':
                 handle_help(user_id)
             elif data_str == 'rate_bot':
@@ -2265,31 +1724,6 @@ def process_webhook_update(data):
                     rating = int(data_str.replace('rate_', ''))
                     db.add_rating(user_id, rating)
                     edit_telegram_message(user_id, message_id, f"⭐ <b>Thank you for rating us {rating}/5!</b>\n\nYour feedback helps us improve the service.\n\nHave a great day! 😊", parse_mode='HTML')
-            elif data_str == 'leaderboard':
-                # Show leaderboard
-                users = db.get_all_users(limit=10)
-                leaderboard = "🏆 <b>TOP 10 DOWNLOADERS</b>\n\n"
-                for i, user in enumerate(users[:10], 1):
-                    uid, uname, fname, downloads, last_dl, banned, join_date, is_premium = user
-                    if banned:
-                        continue
-                    medal = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f"{i}."
-                    premium_badge = "⭐ " if is_premium else ""
-                    leaderboard += f"{medal} <b>{fname}</b> (@{uname or 'N/A'})\n   {premium_badge}📥 {downloads} downloads | ID: <code>{uid}</code>\n\n"
-                send_telegram_message(user_id, leaderboard, parse_mode='HTML')
-            elif data_str == 'platform_stats':
-                # Show platform stats
-                bot_stats = db.get_bot_stats()
-                stats_text = "📊 <b>PLATFORM STATISTICS</b>\n\n"
-                total = bot_stats.get('total_downloads', 0)
-                for platform_stat in bot_stats.get('platform_stats', []):
-                    platform, count = platform_stat
-                    icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-                    percentage = (count / total * 100) if total > 0 else 0
-                    bars = int(percentage / 10)
-                    progress = '█' * bars + '░' * (10 - bars)
-                    stats_text += f"{icon} <b>{platform.title()}</b>\n   📥 {count} downloads ({percentage:.1f}%)\n   [{progress}]\n\n"
-                send_telegram_message(user_id, stats_text, parse_mode='HTML')
             elif data_str.startswith('guide_'):
                 platform = data_str.replace('guide_', '')
                 platform_names = {
@@ -2314,15 +1748,7 @@ def process_webhook_update(data):
                         status = "🔴 BANNED" if banned else ("⭐ PREMIUM" if is_premium else "🟢 FREE")
                         user_list += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code> | {status}\n  📥 {downloads} DLs\n\n"
                     
-                    keyboard = {
-                        'inline_keyboard': [
-                            [
-                                {'text': '🔄 Refresh', 'callback_data': 'admin_users'},
-                                {'text': '⭐ Premium Users', 'callback_data': 'admin_premium_users'}
-                            ]
-                        ]
-                    }
-                    send_telegram_message(user_id, user_list, parse_mode='HTML', reply_markup=keyboard)
+                    send_telegram_message(user_id, user_list, parse_mode='HTML')
             
             elif data_str == 'admin_premium_users':
                 if user_id in ADMIN_IDS:
@@ -2340,71 +1766,9 @@ def process_webhook_update(data):
                             
                             premium_text += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code>\n  📅 {status}\n  📥 {downloads} DLs\n\n"
                         
-                        keyboard = {
-                            'inline_keyboard': [
-                                [
-                                    {'text': '🔄 Refresh', 'callback_data': 'admin_premium_users'},
-                                    {'text': '📊 All Users', 'callback_data': 'admin_users'}
-                                ]
-                            ]
-                        }
-                        send_telegram_message(user_id, premium_text, parse_mode='HTML', reply_markup=keyboard)
+                        send_telegram_message(user_id, premium_text, parse_mode='HTML')
                     else:
                         send_telegram_message(user_id, "❌ No premium users found.", parse_mode='HTML')
-            
-            elif data_str == 'admin_ads':
-                if user_id in ADMIN_IDS:
-                    ads = db.get_ads(active_only=False)
-                    if ads:
-                        ads_text = "📢 <b>ALL ADS</b>\n\n"
-                        for ad in ads:
-                            ad_id, ad_type, content, url, impressions, clicks, is_active, created_at = ad
-                            status = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
-                            ads_text += f"<b>ID:</b> <code>{ad_id}</code>\n"
-                            ads_text += f"<b>Type:</b> {ad_type}\n"
-                            ads_text += f"<b>Status:</b> {status}\n"
-                            ads_text += f"<b>Content:</b> {content[:50]}...\n"
-                            ads_text += f"<b>Impressions:</b> {impressions}\n"
-                            ads_text += f"<b>Clicks:</b> {clicks}\n"
-                            ads_text += f"<b>Created:</b> {created_at}\n\n"
-                        
-                        keyboard = {
-                            'inline_keyboard': [
-                                [
-                                    {'text': '🔄 Refresh', 'callback_data': 'admin_ads'},
-                                    {'text': '➕ New Ad', 'switch_inline_query_current_chat': '/createad '}
-                                ]
-                            ]
-                        }
-                        send_telegram_message(user_id, ads_text, parse_mode='HTML', reply_markup=keyboard)
-                    else:
-                        send_telegram_message(user_id, "❌ No ads found.", parse_mode='HTML')
-            
-            elif data_str == 'admin_stats':
-                if user_id in ADMIN_IDS:
-                    bot_stats = db.get_bot_stats()
-                    stats_text = f"""
-📊 <b>BOT STATISTICS</b>
-
-👥 <b>Users:</b>
-• Total: <b>{bot_stats.get('total_users', 0)}</b>
-• Active: <b>{bot_stats.get('active_users', 0)}</b>
-• Banned: <b>{bot_stats.get('banned_users', 0)}</b>
-• Premium: <b>{bot_stats.get('premium_users', 0)}</b>
-
-📥 <b>Downloads:</b>
-• Total: <b>{bot_stats.get('total_downloads', 0)}</b>
-• Today: <b>{bot_stats.get('today_downloads', 0)}</b>
-
-🔗 <b>Platform Stats:</b>
-"""
-                    for platform_stat in bot_stats.get('platform_stats', []):
-                        platform, count = platform_stat
-                        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-                        stats_text += f"• {icon} {platform.title()}: <b>{count}</b>\n"
-                    
-                    stats_text += f"\n🕒 <b>Last Updated:</b> {datetime.now().strftime('%H:%M:%S')}"
-                    send_telegram_message(user_id, stats_text, parse_mode='HTML')
             
             elif data_str == 'admin_refresh':
                 if user_id in ADMIN_IDS:
@@ -2413,16 +1777,6 @@ def process_webhook_update(data):
             elif data_str == 'admin_logs':
                 if user_id in ADMIN_IDS:
                     send_telegram_message(user_id, "📋 <b>ADMIN LOGS</b>\n\nLogs are stored in the database. Use the admin panel to view detailed logs.", parse_mode='HTML')
-            
-            elif data_str.startswith('compress_') or data_str.startswith('subtitle_'):
-                # Handle premium tools
-                is_premium = db.is_premium_user(user_id)
-                if not is_premium:
-                    send_telegram_message(user_id, "❌ <b>Premium Feature</b>\n\nThis tool is available only for premium users.\n\nContact admin @Tg_AssistBot to upgrade to premium!", parse_mode='HTML')
-                else:
-                    # Extract URL hash and tool type
-                    tool_type = data_str.split('_')[0]
-                    send_telegram_message(user_id, f"🛠️ <b>{tool_type.upper()} Tool</b>\n\nThis feature will be available soon!\n\n<i>Under development - check back later</i>", parse_mode='HTML')
                     
     except Exception as e:
         logger.error(f"Error processing webhook update: {e}")
@@ -2453,7 +1807,7 @@ def initialize_bot():
     
     # Set webhook
     if set_webhook():
-        logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
+        logger.info(f"✅ Webhook set to: {WEBHOOK_URL}")
     else:
         logger.error("❌ Failed to set webhook")
     
