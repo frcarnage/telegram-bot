@@ -34,7 +34,7 @@ import requests as http_requests
 
 # Third-party imports
 import yt_dlp
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, quote
 
 # ========== CONFIGURATION ==========
 TOKEN = "7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c"
@@ -626,27 +626,33 @@ class UniversalDownloader:
     """Universal downloader with premium features"""
     
     PLATFORMS = {
-        'youtube': {'icon': '📺', 'domains': ['youtube.com', 'youtu.be']},
-        'instagram': {'icon': '📸', 'domains': ['instagram.com', 'instagr.am']},
-        'tiktok': {'icon': '🎵', 'domains': ['tiktok.com', 'vm.tiktok.com']},
-        'pinterest': {'icon': '📌', 'domains': ['pinterest.com', 'pin.it']},
-        'terabox': {'icon': '📦', 'domains': ['terabox.com', 'teraboxapp.com']},
-        'twitter': {'icon': '🐦', 'domains': ['twitter.com', 'x.com']},
-        'facebook': {'icon': '📘', 'domains': ['facebook.com', 'fb.watch']},
-        'reddit': {'icon': '🔴', 'domains': ['reddit.com', 'redd.it']},
-        'likee': {'icon': '🎬', 'domains': ['likee.video', 'likee.com']},
-        'snackvideo': {'icon': '🎥', 'domains': ['snackvideo.com']},
-        'dailymotion': {'icon': '🎞️', 'domains': ['dailymotion.com']},
-        'vimeo': {'icon': '🎬', 'domains': ['vimeo.com']},
-        'twitch': {'icon': '👾', 'domains': ['twitch.tv']},
-        'bilibili': {'icon': '🇨🇳', 'domains': ['bilibili.com']},
-        'rutube': {'icon': '🇷🇺', 'domains': ['rutube.ru']}
+        'youtube': {'icon': '📺', 'domains': ['youtube.com', 'youtu.be', 'm.youtube.com', 'www.youtube.com']},
+        'instagram': {'icon': '📸', 'domains': ['instagram.com', 'instagr.am', 'www.instagram.com']},
+        'tiktok': {'icon': '🎵', 'domains': ['tiktok.com', 'vm.tiktok.com', 'www.tiktok.com', 'vt.tiktok.com']},
+        'pinterest': {'icon': '📌', 'domains': ['pinterest.com', 'pin.it', 'www.pinterest.com']},
+        'terabox': {'icon': '📦', 'domains': ['terabox.com', 'teraboxapp.com', 'www.terabox.com', 'teraboxurl.com']},
+        'twitter': {'icon': '🐦', 'domains': ['twitter.com', 'x.com', 'www.twitter.com', 'www.x.com']},
+        'facebook': {'icon': '📘', 'domains': ['facebook.com', 'fb.watch', 'www.facebook.com', 'm.facebook.com']},
+        'reddit': {'icon': '🔴', 'domains': ['reddit.com', 'redd.it', 'www.reddit.com', 'v.redd.it']},
+        'likee': {'icon': '🎬', 'domains': ['likee.video', 'likee.com', 'www.likee.com']},
+        'snackvideo': {'icon': '🎥', 'domains': ['snackvideo.com', 'www.snackvideo.com']},
+        'dailymotion': {'icon': '🎞️', 'domains': ['dailymotion.com', 'www.dailymotion.com']},
+        'vimeo': {'icon': '🎬', 'domains': ['vimeo.com', 'www.vimeo.com']},
+        'twitch': {'icon': '👾', 'domains': ['twitch.tv', 'www.twitch.tv', 'clips.twitch.tv']},
+        'bilibili': {'icon': '🇨🇳', 'domains': ['bilibili.com', 'www.bilibili.com']},
+        'rutube': {'icon': '🇷🇺', 'domains': ['rutube.ru', 'www.rutube.ru']},
+        'rumble': {'icon': '🎥', 'domains': ['rumble.com', 'www.rumble.com']},
+        'streamable': {'icon': '🎞️', 'domains': ['streamable.com', 'www.streamable.com']},
+        'odysee': {'icon': '🔵', 'domains': ['odysee.com', 'www.odysee.com']}
     }
     
     @staticmethod
     def detect_platform(url):
         """Detect which platform the URL belongs to"""
         url_lower = url.lower()
+        # Remove protocol prefix for checking
+        url_lower = url_lower.replace('https://', '').replace('http://', '')
+        
         for platform, data in UniversalDownloader.PLATFORMS.items():
             for domain in data['domains']:
                 if domain in url_lower:
@@ -659,31 +665,97 @@ class UniversalDownloader:
         try:
             max_size = PREMIUM_MAX_SIZE if is_premium else MAX_FILE_SIZE
             
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'best[filesize<?{}]'.format(max_size),
-                'socket_timeout': 30,
-                'retries': 3,
-                'no_check_certificate': True,
-                'ignoreerrors': True,
-                'extract_flat': False,
-                'noplaylist': True,
-                'cookiefile': None,
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Referer': 'https://www.google.com/'
+            # Special handling for Terabox URLs
+            if 'terabox' in url.lower():
+                # Try with special extractor
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': 'best[filesize<?{}]'.format(max_size),
+                    'socket_timeout': 60,
+                    'retries': 3,
+                    'no_check_certificate': True,
+                    'ignoreerrors': True,
+                    'extract_flat': False,
+                    'noplaylist': True,
+                    'cookiefile': None,
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://www.terabox.com/',
+                        'Origin': 'https://www.terabox.com',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-site'
+                    },
+                    'extractor_args': {
+                        'terabox': {'skip': False}
+                    }
                 }
-            }
+            elif 'instagram' in url.lower():
+                # Instagram specific settings with cookies
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': 'best[filesize<?{}]'.format(max_size),
+                    'socket_timeout': 30,
+                    'retries': 3,
+                    'no_check_certificate': True,
+                    'ignoreerrors': True,
+                    'extract_flat': False,
+                    'noplaylist': True,
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://www.instagram.com/',
+                        'Origin': 'https://www.instagram.com',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-site'
+                    },
+                    'cookiefile': None,
+                    'extractor_args': {
+                        'instagram': {
+                            'skip': False,
+                            'geo_bypass': True,
+                            'geo_bypass_country': 'US'
+                        }
+                    }
+                }
+            else:
+                # Default settings for other platforms
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': 'best[filesize<?{}]'.format(max_size),
+                    'socket_timeout': 30,
+                    'retries': 3,
+                    'no_check_certificate': True,
+                    'ignoreerrors': True,
+                    'extract_flat': False,
+                    'noplaylist': True,
+                    'cookiefile': None,
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://www.google.com/'
+                    }
+                }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
                 if not info:
+                    logger.error(f"No info extracted for URL: {url}")
                     return None
                 
                 # Get available formats
@@ -700,6 +772,17 @@ class UniversalDownloader:
                                 'height': fmt.get('height'),
                                 'url': fmt.get('url')
                             })
+                elif 'url' in info:
+                    # Single format available
+                    available_formats.append({
+                        'format_id': 'best',
+                        'ext': info.get('ext', 'mp4'),
+                        'filesize': info.get('filesize', 0),
+                        'format_note': 'best',
+                        'width': info.get('width'),
+                        'height': info.get('height'),
+                        'url': info.get('url')
+                    })
                 
                 # Sort by quality (higher resolution first)
                 available_formats.sort(key=lambda x: (x.get('height', 0) or 0, x.get('filesize', 0)), reverse=True)
@@ -710,14 +793,14 @@ class UniversalDownloader:
                 if best_format:
                     return {
                         'success': True,
-                        'title': info.get('title', 'Video'),
+                        'title': info.get('title', 'Video')[:200],
                         'duration': info.get('duration', 0),
                         'thumbnail': info.get('thumbnail'),
                         'url': best_format.get('url'),
                         'filesize': best_format.get('filesize', 0),
                         'ext': best_format.get('ext', 'mp4'),
                         'quality': best_format.get('format_note', 'best'),
-                        'description': info.get('description', '')[:100] + '...' if info.get('description') else '',
+                        'description': (info.get('description', '')[:100] + '...') if info.get('description') else '',
                         'view_count': info.get('view_count', 0),
                         'uploader': info.get('uploader', 'Unknown'),
                         'available_formats': available_formats[:5]  # Top 5 formats
@@ -725,8 +808,99 @@ class UniversalDownloader:
                 
                 return None
                 
+        except yt_dlp.utils.DownloadError as e:
+            logger.error(f"Download error getting video info: {e}")
+            # Try alternative method for Instagram
+            if 'instagram' in url.lower():
+                return UniversalDownloader._get_instagram_info_alternative(url, max_size)
+            return None
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
+            logger.error(traceback.format_exc())
+            return None
+    
+    @staticmethod
+    def _get_instagram_info_alternative(url, max_size):
+        """Alternative method to get Instagram video info"""
+        try:
+            # Use a different approach for Instagram
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0'
+            }
+            
+            response = http_requests.get(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                # Try to find video URL in the HTML
+                html = response.text
+                
+                # Look for video URLs in the HTML
+                video_url_patterns = [
+                    r'"video_url":"([^"]+)"',
+                    r'"contentUrl":"([^"]+)"',
+                    r'<meta property="og:video" content="([^"]+)"',
+                    r'src="([^"]+\.mp4[^"]*)"',
+                ]
+                
+                for pattern in video_url_patterns:
+                    matches = re.findall(pattern, html)
+                    if matches:
+                        video_url = matches[0]
+                        # Fix URL encoding
+                        video_url = video_url.replace('\\u0026', '&')
+                        
+                        # Get video info from headers
+                        head_response = http_requests.head(video_url, headers=headers, timeout=10, allow_redirects=True)
+                        
+                        if head_response.status_code == 200:
+                            content_length = head_response.headers.get('content-length')
+                            file_size = int(content_length) if content_length else 0
+                            
+                            if file_size <= max_size:
+                                # Extract title
+                                title_patterns = [
+                                    r'"title":"([^"]+)"',
+                                    r'<title>([^<]+)</title>',
+                                    r'<meta property="og:title" content="([^"]+)"'
+                                ]
+                                
+                                title = "Instagram Video"
+                                for tpattern in title_patterns:
+                                    tmatches = re.findall(tpattern, html)
+                                    if tmatches:
+                                        title = tmatches[0]
+                                        break
+                                
+                                return {
+                                    'success': True,
+                                    'title': title[:200],
+                                    'duration': 0,
+                                    'thumbnail': None,
+                                    'url': video_url,
+                                    'filesize': file_size,
+                                    'ext': 'mp4',
+                                    'quality': 'best',
+                                    'description': '',
+                                    'view_count': 0,
+                                    'uploader': 'Instagram',
+                                    'available_formats': [{'format_id': 'best', 'ext': 'mp4', 'filesize': file_size, 'format_note': 'best', 'url': video_url}]
+                                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in Instagram alternative method: {e}")
             return None
     
     @staticmethod
@@ -734,21 +908,43 @@ class UniversalDownloader:
         """Download video to memory with progress tracking"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
                 'Connection': 'keep-alive',
-                'Referer': 'https://www.google.com/'
+                'Referer': 'https://www.google.com/',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site'
             }
             
-            response = http_requests.get(video_url, headers=headers, stream=True, timeout=60)
+            # Special headers for different platforms
+            if 'instagram' in video_url:
+                headers.update({
+                    'Referer': 'https://www.instagram.com/',
+                    'Origin': 'https://www.instagram.com'
+                })
+            elif 'terabox' in video_url:
+                headers.update({
+                    'Referer': 'https://www.terabox.com/',
+                    'Origin': 'https://www.terabox.com'
+                })
+            elif 'tiktok' in video_url:
+                headers.update({
+                    'Referer': 'https://www.tiktok.com/',
+                    'Origin': 'https://www.tiktok.com'
+                })
+            
+            response = http_requests.get(video_url, headers=headers, stream=True, timeout=120)
             
             if response.status_code == 200:
                 total_size = int(response.headers.get('content-length', 0))
                 buffer = io.BytesIO()
                 downloaded = 0
+                chunk_size = 8192
                 
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=chunk_size):
                     if chunk:
                         buffer.write(chunk)
                         downloaded += len(chunk)
@@ -758,16 +954,20 @@ class UniversalDownloader:
                             progress = min(100, int((downloaded / total_size) * 100))
                             progress_callback(progress)
                         
-                        if downloaded > MAX_FILE_SIZE * 2:  # Double check
+                        if downloaded > MAX_FILE_SIZE * 2:  # Double check for safety
+                            logger.warning(f"File too large: {downloaded} bytes")
                             return None, 0
                 
                 buffer.seek(0)
+                logger.info(f"Downloaded {downloaded} bytes from {video_url}")
                 return buffer, downloaded
             
+            logger.error(f"Download failed with status: {response.status_code}")
             return None, 0
             
         except Exception as e:
             logger.error(f"Error downloading video: {e}")
+            logger.error(traceback.format_exc())
             return None, 0
     
     @staticmethod
@@ -801,7 +1001,7 @@ class UniversalDownloader:
                 '-y', temp_output_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0:
                 with open(temp_output_path, 'rb') as f:
@@ -812,9 +1012,12 @@ class UniversalDownloader:
                 os.unlink(temp_output_path)
                 
                 return io.BytesIO(compressed_data), len(compressed_data)
+            else:
+                logger.error(f"FFmpeg error: {result.stderr}")
             
             # Cleanup on failure
-            os.unlink(temp_input_path)
+            if os.path.exists(temp_input_path):
+                os.unlink(temp_input_path)
             if os.path.exists(temp_output_path):
                 os.unlink(temp_output_path)
             
@@ -822,6 +1025,11 @@ class UniversalDownloader:
             
         except Exception as e:
             logger.error(f"Error compressing video: {e}")
+            # Cleanup
+            if 'temp_input_path' in locals() and os.path.exists(temp_input_path):
+                os.unlink(temp_input_path)
+            if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
+                os.unlink(temp_output_path)
             return None, 0
 
 # ========== TELEGRAM BOT FUNCTIONS ==========
@@ -839,7 +1047,7 @@ def send_telegram_message(chat_id, text, parse_mode='HTML', reply_markup=None):
         if reply_markup:
             payload['reply_markup'] = reply_markup
         
-        response = http_requests.post(url, json=payload, timeout=10)
+        response = http_requests.post(url, json=payload, timeout=30)
         logger.info(f"📤 Sent message to {chat_id}, status: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
@@ -863,7 +1071,7 @@ def send_telegram_video(chat_id, video_buffer, caption, filename):
             'supports_streaming': True
         }
         
-        response = http_requests.post(url, data=data, files=files, timeout=60)
+        response = http_requests.post(url, data=data, files=files, timeout=120)
         logger.info(f"📤 Sent video to {chat_id}, status: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
@@ -882,17 +1090,32 @@ def edit_telegram_message(chat_id, message_id, text, parse_mode='HTML'):
             'disable_web_page_preview': True
         }
         
-        response = http_requests.post(url, json=payload, timeout=10)
+        response = http_requests.post(url, json=payload, timeout=30)
         return response.status_code == 200
     except Exception as e:
         logger.error(f"Error editing message: {e}")
+        return False
+
+def delete_telegram_message(chat_id, message_id):
+    """Delete a Telegram message"""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/deleteMessage"
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id
+        }
+        
+        response = http_requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
         return False
 
 def get_bot_info():
     """Get bot information"""
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/getMe"
-        response = http_requests.get(url, timeout=10)
+        response = http_requests.get(url, timeout=30)
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
@@ -908,11 +1131,11 @@ def set_webhook():
         url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
         payload = {
             'url': WEBHOOK_URL,
-            'max_connections': 40,
-            'allowed_updates': ['message', 'callback_query']
+            'max_connections': 100,
+            'allowed_updates': ['message', 'callback_query', 'inline_query']
         }
         
-        response = http_requests.post(url, json=payload, timeout=10)
+        response = http_requests.post(url, json=payload, timeout=30)
         if response.status_code == 200:
             data = response.json()
             logger.info(f"✅ Webhook set: {data}")
@@ -922,6 +1145,19 @@ def set_webhook():
         return False
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
+        return False
+
+def delete_webhook():
+    """Delete Telegram webhook"""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
+        response = http_requests.post(url, timeout=30)
+        if response.status_code == 200:
+            logger.info("✅ Webhook deleted")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error deleting webhook: {e}")
         return False
 
 # ========== BOT HANDLERS ==========
@@ -943,7 +1179,7 @@ def handle_start(user_id, username, first_name, message_id):
 📺 YouTube • 📸 Instagram • 🎵 TikTok
 📌 Pinterest • 📦 Terabox • 🐦 Twitter • 📘 Facebook
 🔴 Reddit • 🎬 Likee • 🎞️ Dailymotion • 🎬 Vimeo
-👾 Twitch • 🇨🇳 Bilibili • 🇷🇺 Rutube
+👾 Twitch • 🇨🇳 Bilibili • 🇷🇺 Rutube • 🎥 Rumble
 
 📥 <b>How to use:</b>
 1. Send me any video link
@@ -1037,15 +1273,18 @@ Download videos from multiple platforms in best quality.
 • Twitch (clips)
 • Bilibili (videos)
 • Rutube (videos)
+• Rumble (videos)
+• Streamable (videos)
+• Odysee (videos)
 
 📥 <b>How to Download:</b>
 1. Copy video link from any app
 2. Send it to me as a message
-3. Wait 10-30 seconds for processing
+3. Wait 10-60 seconds for processing
 4. Receive video directly in chat
 
 🎯 <b>Quality Options:</b>
-• Free: Max 720p (auto selection)
+• Free: Best available (up to 720p)
 • Premium: Up to 4K when available
 • Multiple format options for premium users
 
@@ -1053,6 +1292,7 @@ Download videos from multiple platforms in best quality.
 • YouTube: <code>https://youtube.com/watch?v=dQw4w9WgXcQ</code>
 • Instagram: <code>https://instagram.com/p/Cxample123/</code>
 • TikTok: <code>https://tiktok.com/@user/video/123456789</code>
+• Terabox: <code>https://terabox.com/s/xxxxx</code>
 • <b>Any valid video link!</b>
 
 ⚠️ <b>Limitations:</b>
@@ -1071,6 +1311,7 @@ Download videos from multiple platforms in best quality.
    - File might be too large
    - Server might be busy
    - Try again in 5 minutes
+   - Use /report to notify admin
 
 3. <b>Quality issues?</b>
    - Source might limit quality
@@ -1084,6 +1325,7 @@ Download videos from multiple platforms in best quality.
 /history - Your download history
 /premium - Premium subscription info
 /features - All bot features
+/report - Report issues
 
 🛡 <b>Privacy:</b>
 • Videos are never stored on our servers
@@ -1333,7 +1575,7 @@ def handle_features(user_id):
 <b>🛠️ ALL FEATURES</b>
 
 <b>📥 Core Features:</b>
-✅ Download from 15+ platforms
+✅ Download from 18+ platforms
 ✅ Best quality auto-selection
 ✅ No storage on servers
 ✅ Fast processing
@@ -1354,6 +1596,8 @@ def handle_features(user_id):
 ✅ Automatic format detection
 ✅ Multi-threaded downloads
 ✅ Error recovery
+✅ Instagram rate-limit bypass
+✅ Terabox support
 
 <b>📊 Analytics Features:</b>
 ✅ Download history
@@ -1381,7 +1625,8 @@ def handle_features(user_id):
 ✅ Pinterest, Terabox, Twitter
 ✅ Facebook, Reddit, Likee
 ✅ Dailymotion, Vimeo, Twitch
-✅ Bilibili, Rutube, and more!
+✅ Bilibili, Rutube, Rumble
+✅ Streamable, Odysee, and more!
 """
     
     keyboard = {
@@ -1530,6 +1775,37 @@ def handle_admin(user_id):
     
     return send_telegram_message(user_id, admin_text, parse_mode='HTML', reply_markup=keyboard)
 
+def handle_report(user_id, text):
+    """Handle /report command to report issues"""
+    report_text = text.replace('/report', '').strip()
+    
+    if not report_text:
+        return send_telegram_message(user_id, "📝 <b>Usage:</b> <code>/report [your issue here]</code>\n\nExample: /report Instagram videos not downloading", parse_mode='HTML')
+    
+    # Save report to database
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO admin_logs (admin_id, action, target_id, details)
+            VALUES (?, 'user_report', ?, ?)
+        ''', (user_id, user_id, report_text))
+        db.conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving report: {e}")
+    
+    # Notify admin
+    for admin_id in ADMIN_IDS:
+        admin_msg = f"""
+🚨 <b>USER REPORT</b>
+
+👤 <b>User:</b> {user_id}
+📝 <b>Report:</b> {report_text}
+🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
+"""
+        send_telegram_message(admin_id, admin_msg, parse_mode='HTML')
+    
+    return send_telegram_message(user_id, "✅ <b>Report submitted!</b>\n\nThank you for your feedback. Our admin team will review it shortly.", parse_mode='HTML')
+
 def handle_video_download(user_id, username, first_name, text, message_id):
     """Handle video download requests"""
     # Check if user is banned
@@ -1541,7 +1817,7 @@ def handle_video_download(user_id, username, first_name, text, message_id):
     urls = re.findall(url_pattern, text)
     
     if not urls:
-        return send_telegram_message(user_id, "🔍 <b>No URL found.</b>\n\nPlease send a video link from:\n• YouTube\n• Instagram\n• TikTok\n• Pinterest\n• Terabox\n• Twitter\n• Facebook\n\nExample: <code>https://youtube.com/watch?v=dQw4w9WgXcQ</code>", parse_mode='HTML')
+        return send_telegram_message(user_id, "🔍 <b>No URL found.</b>\n\nPlease send a video link from:\n• YouTube\n• Instagram\n• TikTok\n• Pinterest\n• Terabox\n• Twitter\n• Facebook\n• Reddit\n• Likee\n• Dailymotion\n• Vimeo\n• Twitch\n\nExample: <code>https://youtube.com/watch?v=dQw4w9WgXcQ</code>", parse_mode='HTML')
     
     url = urls[0].strip()
     
@@ -1549,7 +1825,7 @@ def handle_video_download(user_id, username, first_name, text, message_id):
     platform, icon = UniversalDownloader.detect_platform(url)
     
     if not platform:
-        return send_telegram_message(user_id, "❌ <b>Platform not supported.</b>\n\nI support:\n• YouTube (youtube.com)\n• Instagram (instagram.com)\n• TikTok (tiktok.com)\n• Pinterest (pinterest.com)\n• Terabox (terabox.com)\n• Twitter/X (twitter.com/x.com)\n• Facebook (facebook.com)\n• Reddit (reddit.com)\n• Likee (likee.com)\n• Dailymotion (dailymotion.com)\n• Vimeo (vimeo.com)\n\nPlease check your link and try again.", parse_mode='HTML')
+        return send_telegram_message(user_id, f"❌ <b>Platform not supported.</b>\n\nI support:\n• YouTube (youtube.com)\n• Instagram (instagram.com)\n• TikTok (tiktok.com)\n• Pinterest (pinterest.com)\n• Terabox (terabox.com)\n• Twitter/X (twitter.com/x.com)\n• Facebook (facebook.com)\n• Reddit (reddit.com)\n• Likee (likee.com)\n• Dailymotion (dailymotion.com)\n• Vimeo (vimeo.com)\n• Twitch (twitch.tv)\n• Rumble (rumble.com)\n\nYour link: <code>{url[:50]}...</code>\n\nPlease check your link and try again.", parse_mode='HTML')
     
     # Check if premium user
     is_premium = db.is_premium_user(user_id)
@@ -1560,10 +1836,10 @@ def handle_video_download(user_id, username, first_name, text, message_id):
     if stats['hourly'] >= rate_limit:
         return send_telegram_message(user_id, f"⏰ <b>Rate Limit Reached!</b>\n\nYou've used {stats['hourly']}/{rate_limit} downloads this hour.\nPlease wait 1 hour before downloading more.\n\n{'⭐ Premium users get 50 downloads/hour' if not is_premium else ''}\n\n<i>Tip: The limit resets every hour at :00 minutes.</i>", parse_mode='HTML')
     
-    # Send processing message with progress bar
-    status_msg = f"{icon} <b>Processing {platform.upper()} link...</b>\n\n"
-    status_msg += "⏳ Please wait while I analyze the video...\n"
+    # Send initial processing message
+    status_msg = f"{icon} <b>Processing {platform.upper()} link...</b>\n\n⏳ Please wait while I analyze the video...\n\n<i>This may take 10-60 seconds depending on the platform.</i>"
     
+    # Send processing message and store its ID
     send_telegram_message(user_id, status_msg, parse_mode='HTML')
     
     # Process in background thread
@@ -1574,14 +1850,14 @@ def handle_video_download(user_id, username, first_name, text, message_id):
 def process_video_download(user_id, username, first_name, url, platform, icon, message_id, is_premium):
     """Process video download in background thread"""
     try:
-        # Update progress
-        edit_telegram_message(user_id, message_id + 1, f"{icon} <b>{platform.upper()} DETECTED</b>\n\n🔍 Analyzing video information...")
+        # Get video information
+        edit_telegram_message(user_id, message_id + 1, f"{icon} <b>{platform.upper()} DETECTED</b>\n\n🔍 Analyzing video information...\n\n<i>This may take a moment...</i>")
         
         # Get video information
         video_info = UniversalDownloader.get_video_info(url, is_premium)
         
         if not video_info:
-            edit_telegram_message(user_id, message_id + 1, "❌ <b>Failed to get video information</b>\n\nPossible reasons:\n• Video is private/restricted\n• Link is invalid or expired\n• Platform is blocking downloads\n\nPlease try a different video.")
+            edit_telegram_message(user_id, message_id + 1, f"❌ <b>Failed to get video information</b>\n\nPlatform: {platform.upper()}\n\nPossible reasons:\n• Video is private/restricted\n• Link is invalid or expired\n• Platform is blocking downloads\n• Server timeout\n\nPlease try a different video or use /report to notify admin.")
             return
         
         # Check file size
@@ -1600,13 +1876,14 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
 📊 <b>VIDEO INFORMATION</b>
 
 📁 <b>Title:</b> {video_info['title'][:100]}
-👤 <b>Uploader:</b> {video_info.get('uploader', 'Unknown')}
+👤 <b>Uploader:</b> {video_info.get('uploader', 'Unknown')[:50]}
 ⏱ <b>Duration:</b> {duration_str}
 💾 <b>Size:</b> {size_mb:.1f}MB
 🎯 <b>Quality:</b> {video_info.get('quality', 'best')}
 👁 <b>Views:</b> {video_info.get('view_count', 'N/A')}
 
 📥 <b>Starting download...</b>
+<i>Please wait, this may take a few minutes.</i>
 """
         
         edit_telegram_message(user_id, message_id + 1, info_text)
@@ -1615,13 +1892,13 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
         video_buffer, downloaded_size = UniversalDownloader.download_video(video_info['url'])
         
         if not video_buffer:
-            edit_telegram_message(user_id, message_id + 1, "❌ <b>Download Failed</b>\n\nCould not download the video.\nPossible reasons:\n• Network error\n• Server timeout\n• Video unavailable\n\nPlease try again or use a different link.")
+            edit_telegram_message(user_id, message_id + 1, "❌ <b>Download Failed</b>\n\nCould not download the video.\nPossible reasons:\n• Network error\n• Server timeout\n• Video unavailable\n• Platform restrictions\n\nPlease try again or use a different link.\nUse /report to notify admin if problem persists.")
             # Record failed download
             db.record_download(user_id, platform, url, video_info['title'], 0, video_info.get('quality', 'unknown'), False)
             return
         
         # Upload to Telegram
-        edit_telegram_message(user_id, message_id + 1, "📤 <b>Uploading to Telegram...</b>\n\nFinal step...")
+        edit_telegram_message(user_id, message_id + 1, "📤 <b>Uploading to Telegram...</b>\n\nFinal step... This may take a moment.")
         
         # Prepare caption
         file_size_mb = downloaded_size / (1024 * 1024)
@@ -1635,7 +1912,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
 💾 <b>Size:</b> {file_size_mb:.1f}MB
 ⏱ <b>Duration:</b> {duration_str}
 🎯 <b>Quality:</b> {video_info.get('quality', 'best')}
-{'⭐ <b>Premium:</b> Yes' if is_premium else ''}
+{'⭐ <b>Premium:</b> Yes' if is_premium else '🆓 <b>Free:</b> Yes'}
 
 🤖 Downloaded via @{BOT_USERNAME}
 """
@@ -1681,7 +1958,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
                     send_telegram_message(admin_id, admin_message, parse_mode='HTML')
         
         else:
-            edit_telegram_message(user_id, message_id + 1, "❌ <b>Upload Failed</b>\n\nCould not send video to Telegram.\nPlease try again.")
+            edit_telegram_message(user_id, message_id + 1, "❌ <b>Upload Failed</b>\n\nCould not send video to Telegram.\nPossible reasons:\n• File too large for Telegram\n• Telegram API error\n• Network issue\n\nPlease try again or use /report.")
             db.record_download(user_id, platform, url, video_info['title'], 0, video_info.get('quality', 'best'), False)
         
         # Clean up
@@ -1689,7 +1966,12 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
         
     except Exception as e:
         logger.error(f"Error in process_video_download: {e}")
-        edit_telegram_message(user_id, message_id + 1, f"❌ <b>Download Failed</b>\n\nError: <code>{str(e)[:100]}</code>\n\nPlease try again or contact support.")
+        logger.error(traceback.format_exc())
+        error_msg = f"❌ <b>Download Failed</b>\n\nError: <code>{str(e)[:200]}</code>\n\nPlease try again or contact support using /report."
+        try:
+            edit_telegram_message(user_id, message_id + 1, error_msg)
+        except:
+            send_telegram_message(user_id, error_msg, parse_mode='HTML')
         db.record_download(user_id, platform, url, "Unknown", 0, "unknown", False)
 
 # ========== FLASK APP ==========
@@ -1701,7 +1983,7 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'telegram-downloader-bot',
-        'version': '4.0',
+        'version': '4.1',
         'timestamp': datetime.now().isoformat(),
         'bot': BOT_USERNAME,
         'endpoints': ['/health', '/ping', '/ping1', '/ping2', '/stats', '/webhook']
@@ -1751,7 +2033,7 @@ def webhook():
             data = request.get_json()
             
             # Log the update
-            logger.info(f"📩 Received update from Telegram: {data}")
+            logger.info(f"📩 Received update from Telegram")
             
             # Process update in background thread
             Thread(target=process_webhook_update, args=(data,)).start()
@@ -1768,8 +2050,6 @@ def webhook():
 def process_webhook_update(data):
     """Process webhook update"""
     try:
-        logger.info(f"🔄 Processing update: {data}")
-        
         # Check if it's a message
         if 'message' in data:
             message = data['message']
@@ -1780,7 +2060,7 @@ def process_webhook_update(data):
             message_id = message.get('message_id')
             text = message.get('text', '').strip()
             
-            logger.info(f"📝 Message from {user_id} ({first_name}): {text[:50]}")
+            logger.info(f"📝 Message from {user_id} ({first_name}): {text[:100]}")
             
             # Handle commands
             if text.startswith('/'):
@@ -1797,6 +2077,8 @@ def process_webhook_update(data):
                     handle_ping(user_id)
                 elif command == '/admin':
                     handle_admin(user_id)
+                elif command == '/report':
+                    handle_report(user_id, text)
                 elif command.startswith('/users'):
                     # Handle admin users command
                     if user_id in ADMIN_IDS:
@@ -1834,7 +2116,7 @@ def process_webhook_update(data):
                                 target_id = int(parts[1])
                                 reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
                                 if db.remove_premium(target_id, user_id, reason):
-                                    send_telegram_message(user_id, f"✅ Premium removed from user <code>{target_id}</code>.", parse_mode='HTML')
+                                    send_telegram_message(user_id, f"✅ Premium removed from user <code>{target_id}</code>.", parse_mode='HTML")
                                 else:
                                     send_telegram_message(user_id, f"❌ Failed to remove premium from user <code>{target_id}</code>.", parse_mode='HTML')
                             except ValueError:
@@ -1994,7 +2276,7 @@ def process_webhook_update(data):
                 }
                 if platform in platform_names:
                     name, icon = platform_names[platform]
-                    send_telegram_message(user_id, f"{icon} <b>{name} DOWNLOAD</b>\n\nSend me any {name} video link and I'll download it!\n\n<i>Tip: Copy link from {name} app and paste it here.</i>", parse_mode='HTML')
+                    send_telegram_message(user_id, f"{icon} <b>{name} DOWNLOAD</b>\n\nSend me any {name} video link and I'll download it!\n\n<i>Tip: Copy link from {name} app and paste it here.</i>\n\n<b>Example:</b> <code>{'https://youtube.com/watch?v=...' if platform == 'youtube' else 'https://instagram.com/p/...' if platform == 'instagram' else 'https://tiktok.com/@user/video/...' if platform == 'tiktok' else 'https://terabox.com/s/...'}</code>", parse_mode='HTML')
             
             # Admin callbacks
             elif data_str == 'admin_users':
@@ -2049,19 +2331,34 @@ def initialize_bot():
     
     print("=" * 60)
     print("🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT - PREMIUM EDITION")
-    print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox • 15+ Platforms")
+    print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox • 18+ Platforms")
     print("⭐ Premium Features • Analytics • Compression")
     print("🌐 Deployed on Koyeb - Production Ready")
     print("=" * 60)
     
     # Get bot info
-    bot_info = get_bot_info()
-    if bot_info:
-        BOT_USERNAME = bot_info.get('username', '')
-        logger.info(f"✅ Bot username: @{BOT_USERNAME}")
-    else:
-        logger.error("❌ Failed to get bot info")
+    retries = 3
+    for i in range(retries):
+        try:
+            bot_info = get_bot_info()
+            if bot_info:
+                BOT_USERNAME = bot_info.get('username', '')
+                logger.info(f"✅ Bot username: @{BOT_USERNAME}")
+                break
+            else:
+                logger.error(f"❌ Failed to get bot info (attempt {i+1}/{retries})")
+                time.sleep(2)
+        except Exception as e:
+            logger.error(f"Error getting bot info (attempt {i+1}/{retries}): {e}")
+            time.sleep(2)
+    
+    if not BOT_USERNAME:
+        logger.error("❌ Failed to get bot info after retries")
         BOT_USERNAME = "TelegramDownloaderBot"
+    
+    # Delete existing webhook first
+    delete_webhook()
+    time.sleep(1)
     
     # Set webhook
     if set_webhook():
@@ -2078,7 +2375,7 @@ def initialize_bot():
 🌐 <b>Host:</b> Koyeb Cloud
 🔗 <b>Webhook:</b> {WEBHOOK_URL}
 📊 <b>Database:</b> Connected
-⭐ <b>Version:</b> 4.0 Premium Edition
+⭐ <b>Version:</b> 4.1 Premium Edition
 ✅ <b>Status:</b> 🟢 Online
 
 <b>All features loaded and ready! 🎉</b>
