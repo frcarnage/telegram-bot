@@ -2,7 +2,7 @@
 """
 🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT - PREMIUM EDITION
 📥 YouTube, Instagram, TikTok, Pinterest, Terabox + 15+ Platforms
-⭐ Premium Features • Analytics • Compression • Editing Tools
+⭐ Premium Features • Analytics • Compression
 🌐 Deployed on Koyeb - Production Ready
 """
 
@@ -35,8 +35,6 @@ import requests as http_requests
 # Third-party imports
 import yt_dlp
 from urllib.parse import urlparse, unquote
-from PIL import Image, ImageDraw, ImageFont
-import moviepy.editor as mpe
 
 # ========== CONFIGURATION ==========
 TOKEN = "7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c"
@@ -823,47 +821,6 @@ class UniversalDownloader:
             return None, 0
     
     @staticmethod
-    def create_video_gif(input_buffer, start_time=0, duration=5):
-        """Create GIF from video"""
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
-                temp_video.write(input_buffer.read())
-                video_path = temp_video.name
-            
-            with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as temp_gif:
-                gif_path = temp_gif.name
-            
-            # Create GIF using moviepy
-            video = mpe.VideoFileClip(video_path)
-            
-            # Extract segment
-            if duration > video.duration - start_time:
-                duration = video.duration - start_time
-            
-            segment = video.subclip(start_time, start_time + duration)
-            
-            # Resize for smaller GIF
-            segment = segment.resize(height=240)
-            
-            # Write GIF
-            segment.write_gif(gif_path, fps=10)
-            
-            # Read GIF
-            with open(gif_path, 'rb') as f:
-                gif_data = f.read()
-            
-            # Cleanup
-            video.close()
-            os.unlink(video_path)
-            os.unlink(gif_path)
-            
-            return io.BytesIO(gif_data), len(gif_data)
-            
-        except Exception as e:
-            logger.error(f"Error creating GIF: {e}")
-            return None, 0
-    
-    @staticmethod
     def extract_subtitles(video_url):
         """Extract subtitles from video"""
         try:
@@ -1080,7 +1037,6 @@ def handle_start(user_id, username, first_name, message_id):
 • 200MB file size limit
 • 50 downloads/hour
 • Video compression
-• Video to GIF converter
 • Subtitle extraction
 • Priority processing
 
@@ -1179,7 +1135,6 @@ Download videos from multiple platforms in best quality.
 
 🛠️ <b>Premium Tools:</b>
 • Video Compression (reduce file size)
-• Video to GIF converter
 • Subtitle extraction
 • Batch downloading
 • Custom quality selection
@@ -1406,12 +1361,10 @@ def handle_premium_info(user_id):
 ✅ <b>200MB</b> file size limit (Free: 50MB)
 ✅ <b>{PREMIUM_RATE_LIMIT}</b> downloads/hour (Free: {RATE_LIMIT})
 ✅ <b>Video Compression</b> tool
-✅ <b>Video to GIF</b> converter
 ✅ <b>Subtitle Extraction</b>
 ✅ <b>Priority Processing</b>
 ✅ <b>Custom Quality Selection</b>
 ✅ <b>Batch Downloading</b>
-✅ <b>No Ads</b>
 ✅ <b>Priority Support</b>
 
 <b>Pricing:</b>
@@ -1480,12 +1433,10 @@ def handle_features(user_id):
 ✅ 200MB file size limit
 ✅ 50 downloads/hour
 ✅ Video compression
-✅ Video to GIF converter
 ✅ Subtitle extraction
 ✅ Custom quality selection
 ✅ Priority processing
 ✅ Batch downloading
-✅ No ads
 ✅ Priority support
 
 <b>🔄 Processing Features:</b>
@@ -1522,13 +1473,6 @@ def handle_features(user_id):
 ✅ Facebook, Reddit, Likee
 ✅ Dailymotion, Vimeo, Twitch
 ✅ Bilibili, Rutube, and more!
-
-<b>🚀 Coming Soon:</b>
-• Audio extraction
-• Playlist downloading
-• Scheduled downloads
-• Cloud storage integration
-• API access
 """
     
     keyboard = {
@@ -1564,13 +1508,7 @@ def handle_tools_menu(user_id):
    • Maintains original resolution
    • Fast processing
 
-2. <b>🔄 Video to GIF</b>
-   Convert video clips to animated GIFs
-   • Select start time
-   • Choose duration (up to 10 seconds)
-   • Custom resolution
-
-3. <b>📝 Subtitle Extraction</b>
+2. <b>📝 Subtitle Extraction</b>
    Extract subtitles from videos
    • Multiple formats: SRT, VTT, ASS
    • Auto language detection
@@ -1589,15 +1527,15 @@ def handle_tools_menu(user_id):
         'inline_keyboard': [
             [
                 {'text': '🎞️ Compress Video', 'callback_data': 'compress_info'},
-                {'text': '🔄 Video to GIF', 'callback_data': 'gif_info'}
+                {'text': '📝 Extract Subtitles', 'callback_data': 'subtitle_info'}
             ],
             [
-                {'text': '📝 Extract Subtitles', 'callback_data': 'subtitle_info'},
-                {'text': '📥 Download Video', 'switch_inline_query_current_chat': ''}
+                {'text': '📥 Download Video', 'switch_inline_query_current_chat': ''},
+                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
             ],
             [
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'},
-                {'text': '⭐ Premium Info', 'callback_data': 'premium_info'}
+                {'text': '⭐ Premium Info', 'callback_data': 'premium_info'},
+                {'text': '📖 Help Guide', 'callback_data': 'help_menu'}
             ]
         ]
     }
@@ -1797,7 +1735,7 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
         # Define progress callback
         def progress_callback(percent):
             progress_bars = int(percent / 10)
-            progress_text = f"📥 <b>Downloading...</b>\n\n▰" * progress_bars + "▱" * (10 - progress_bars) + f" {percent}%"
+            progress_text = f"📥 <b>Downloading...</b>\n\n{'▰' * progress_bars}{'▱' * (10 - progress_bars)} {percent}%"
             edit_telegram_message(user_id, message_id + 1, info_text.split('📥')[0] + progress_text)
         
         # Download video
@@ -1851,11 +1789,11 @@ def process_video_download(user_id, username, first_name, url, platform, icon, m
                 'inline_keyboard': [
                     [
                         {'text': '🎞️ Compress', 'callback_data': f'compress_{url[:20]}'},
-                        {'text': '🔄 To GIF', 'callback_data': f'gif_{url[:20]}'}
+                        {'text': '📝 Subtitles', 'callback_data': f'subtitle_{url[:20]}'}
                     ],
                     [
-                        {'text': '📝 Subtitles', 'callback_data': f'subtitle_{url[:20]}'},
-                        {'text': '⭐ Rate', 'callback_data': 'rate_bot'}
+                        {'text': '⭐ Rate', 'callback_data': 'rate_bot'},
+                        {'text': '📊 Stats', 'callback_data': 'my_stats'}
                     ]
                 ]
             }
@@ -2288,7 +2226,6 @@ def process_webhook_update(data):
                 except:
                     handle_history(user_id)
             elif data_str == 'clear_history':
-                # This would require additional database method
                 send_telegram_message(user_id, "🗑️ <b>Clear History</b>\n\nThis feature is under development. Contact admin for assistance.", parse_mode='HTML')
             elif data_str == 'premium_info':
                 handle_premium_info(user_id)
@@ -2298,8 +2235,6 @@ def process_webhook_update(data):
                 handle_tools_menu(user_id)
             elif data_str == 'compress_info':
                 send_telegram_message(user_id, "🎞️ <b>Video Compression</b>\n\nThis tool reduces video file size while maintaining quality.\n\nTo use:\n1. Download a video first\n2. Click the 'Compress' button below the video\n3. Select compression level\n4. Wait for processing\n\n<i>Premium feature only</i>", parse_mode='HTML')
-            elif data_str == 'gif_info':
-                send_telegram_message(user_id, "🔄 <b>Video to GIF</b>\n\nConvert video clips to animated GIFs.\n\nTo use:\n1. Download a video first\n2. Click the 'To GIF' button below the video\n3. Select start time and duration\n4. Wait for conversion\n\n<i>Premium feature only</i>", parse_mode='HTML')
             elif data_str == 'subtitle_info':
                 send_telegram_message(user_id, "📝 <b>Subtitle Extraction</b>\n\nExtract subtitles from videos in multiple formats.\n\nTo use:\n1. Download a video first\n2. Click the 'Subtitles' button below the video\n3. Select language preference\n4. Download subtitle files\n\n<i>Premium feature only</i>", parse_mode='HTML')
             elif data_str == 'help_menu':
@@ -2479,7 +2414,7 @@ def process_webhook_update(data):
                 if user_id in ADMIN_IDS:
                     send_telegram_message(user_id, "📋 <b>ADMIN LOGS</b>\n\nLogs are stored in the database. Use the admin panel to view detailed logs.", parse_mode='HTML')
             
-            elif data_str.startswith('compress_') or data_str.startswith('gif_') or data_str.startswith('subtitle_'):
+            elif data_str.startswith('compress_') or data_str.startswith('subtitle_'):
                 # Handle premium tools
                 is_premium = db.is_premium_user(user_id)
                 if not is_premium:
@@ -2503,7 +2438,7 @@ def initialize_bot():
     print("=" * 60)
     print("🤖 TELEGRAM UNIVERSAL DOWNLOADER BOT - PREMIUM EDITION")
     print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox • 15+ Platforms")
-    print("⭐ Premium Features • Analytics • Compression • Editing Tools")
+    print("⭐ Premium Features • Analytics • Compression")
     print("🌐 Deployed on Koyeb - Production Ready")
     print("=" * 60)
     
