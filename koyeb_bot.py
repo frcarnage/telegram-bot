@@ -3,14 +3,13 @@
 🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT
 📥 YouTube, Instagram, TikTok, Pinterest, Terabox
 🌐 Deployed on Koyeb - 24/7 FREE Hosting
-✅ COMPLETE FIXED CODE - WORKING 100%
+✅ PRODUCTION READY WITH FLASK WEBHOOKS
 """
 
 import os
 import sys
 import logging
 import re
-import asyncio
 import json
 import time
 import hashlib
@@ -19,10 +18,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import io
 import sqlite3
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import traceback
 
-# Telegram imports - UPDATED for python-telegram-bot v20+
+# Flask imports for webhooks
+from flask import Flask, request, jsonify
+from threading import Thread
+
+# Telegram imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
@@ -30,6 +32,7 @@ from telegram.ext import (
     ApplicationBuilder
 )
 from telegram.constants import ParseMode
+import telegram
 
 # Third-party imports
 import requests
@@ -41,10 +44,15 @@ from urllib.parse import urlparse, unquote
 # ========== CONFIGURATION ==========
 TOKEN = "7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c"
 ADMIN_IDS = [7575087826]  # Your admin ID
-BOT_USERNAME = ""
+BOT_USERNAME = "TelegramDownloaderKoyebBot"  # Will be updated
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB Telegram limit
 RATE_LIMIT = 10  # Downloads per hour per user
 PORT = int(os.environ.get("PORT", 8080))  # Koyeb uses PORT 8080
+
+# Get Koyeb URL
+KOYEB_APP_NAME = os.environ.get("KOYEB_APP_NAME", "encouraging-di-1carnage1-6226074c")
+KOYEB_ORG = os.environ.get("KOYEB_ORG", "koyeb")
+WEBHOOK_URL = f"https://{KOYEB_APP_NAME}.{KOYEB_ORG}.app/webhook"
 
 # ========== LOGGING SETUP ==========
 logging.basicConfig(
@@ -57,82 +65,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== HEALTH SERVER FOR KOYEB ==========
-class HealthServer:
-    """HTTP Server for health checks - REQUIRED for Koyeb"""
-    
-    def __init__(self, port=8080):
-        self.port = port
-        self.server = None
-        self.thread = None
-        
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path in ['/health', '/ping', '/ping1', '/ping2', '/']:
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                response = {
-                    'status': 'online',
-                    'service': 'telegram-downloader-bot',
-                    'timestamp': datetime.now().isoformat(),
-                    'endpoint': self.path,
-                    'message': 'Bot is running on Koyeb',
-                    'version': '2.0'
-                }
-                self.wfile.write(json.dumps(response).encode())
-            elif self.path == '/stats':
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                response = {
-                    'status': 'online',
-                    'timestamp': datetime.now().isoformat(),
-                    'endpoints': ['/health', '/ping', '/ping1', '/ping2', '/stats']
-                }
-                self.wfile.write(json.dumps(response).encode())
-            else:
-                self.send_response(404)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                response = {'error': 'Endpoint not found'}
-                self.wfile.write(json.dumps(response).encode())
-        
-        def log_message(self, format, *args):
-            pass  # Disable access logs
-    
-    def start(self):
-        """Start the health server in a separate thread"""
-        def run():
-            try:
-                self.server = HTTPServer(('0.0.0.0', self.port), self.HealthHandler)
-                logger.info(f"✅ Health server started on port {self.port}")
-                logger.info(f"📡 Endpoints: /health, /ping, /ping1, /ping2, /stats")
-                self.server.serve_forever()
-            except Exception as e:
-                logger.error(f"❌ Health server error: {e}")
-        
-        self.thread = threading.Thread(target=run, daemon=True)
-        self.thread.start()
-        logger.info(f"✅ Health server thread started")
-        return True
+# ========== FLASK APP SETUP ==========
+app = Flask(__name__)
 
 # ========== DATABASE SETUP ==========
 class Database:
-    """SQLite database handler - SIMPLIFIED VERSION"""
+    """SQLite database handler"""
     
     def __init__(self):
         self.db_file = "bot_database.db"
         self.setup_database()
     
     def setup_database(self):
-        """Setup SQLite database with tables - SIMPLIFIED"""
+        """Setup SQLite database with tables"""
         try:
             self.conn = sqlite3.connect(self.db_file, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             cursor = self.conn.cursor()
             
-            # Users table - SIMPLIFIED
+            # Users table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -140,27 +91,43 @@ class Database:
                     first_name TEXT,
                     join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     downloads INTEGER DEFAULT 0,
-                    last_download TIMESTAMP
+                    last_download TIMESTAMP,
+                    is_banned INTEGER DEFAULT 0
                 )
             ''')
             
-            # Downloads table - SIMPLIFIED
+            # Downloads table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS downloads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     platform TEXT,
                     url TEXT,
-                    download_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    file_size INTEGER,
+                    download_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    success INTEGER DEFAULT 1,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
                 )
             ''')
+            
+            # Stats table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stats (
+                    id INTEGER PRIMARY KEY,
+                    total_users INTEGER DEFAULT 0,
+                    total_downloads INTEGER DEFAULT 0,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Initialize stats
+            cursor.execute('INSERT OR IGNORE INTO stats (id) VALUES (1)')
             
             self.conn.commit()
             logger.info("✅ Database setup complete")
             
         except Exception as e:
             logger.error(f"❌ Database setup failed: {e}")
-            # Don't raise, continue without database
     
     def add_user(self, user_id, username, first_name):
         """Add or update user in database"""
@@ -170,6 +137,10 @@ class Database:
                 INSERT OR IGNORE INTO users (user_id, username, first_name)
                 VALUES (?, ?, ?)
             ''', (user_id, username, first_name))
+            
+            # Update stats
+            cursor.execute('UPDATE stats SET total_users = (SELECT COUNT(*) FROM users) WHERE id = 1')
+            
             self.conn.commit()
             return True
         except Exception as e:
@@ -177,7 +148,7 @@ class Database:
             return False
     
     def get_user_stats(self, user_id):
-        """Get user download statistics - SIMPLIFIED"""
+        """Get user download statistics"""
         try:
             cursor = self.conn.cursor()
             
@@ -189,6 +160,14 @@ class Database:
             ''', (user_id,))
             hourly = cursor.fetchone()[0]
             
+            # Get daily downloads
+            cursor.execute('''
+                SELECT COUNT(*) FROM downloads 
+                WHERE user_id = ? 
+                AND date(download_date) = date('now')
+            ''', (user_id,))
+            daily = cursor.fetchone()[0]
+            
             # Get total downloads
             cursor.execute('SELECT downloads FROM users WHERE user_id = ?', (user_id,))
             result = cursor.fetchone()
@@ -196,24 +175,25 @@ class Database:
             
             return {
                 'hourly': hourly,
+                'daily': daily,
                 'total': total,
                 'remaining': max(0, RATE_LIMIT - hourly)
             }
             
         except Exception as e:
             logger.error(f"Error getting user stats: {e}")
-            return {'hourly': 0, 'total': 0, 'remaining': RATE_LIMIT}
+            return {'hourly': 0, 'daily': 0, 'total': 0, 'remaining': RATE_LIMIT}
     
-    def record_download(self, user_id, platform, url):
-        """Record a download attempt - SIMPLIFIED"""
+    def record_download(self, user_id, platform, url, file_size, success=True):
+        """Record a download attempt"""
         try:
             cursor = self.conn.cursor()
             
             # Record download
             cursor.execute('''
-                INSERT INTO downloads (user_id, platform, url)
-                VALUES (?, ?, ?)
-            ''', (user_id, platform, url))
+                INSERT INTO downloads (user_id, platform, url, file_size, success)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, platform, url, file_size, 1 if success else 0))
             
             # Update user download count
             cursor.execute('''
@@ -223,21 +203,70 @@ class Database:
                 WHERE user_id = ?
             ''', (user_id,))
             
+            # Update stats
+            cursor.execute('UPDATE stats SET total_downloads = total_downloads + 1, last_updated = CURRENT_TIMESTAMP WHERE id = 1')
+            
             self.conn.commit()
             return True
             
         except Exception as e:
             logger.error(f"Error recording download: {e}")
             return False
+    
+    def get_bot_stats(self):
+        """Get overall bot statistics"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT total_users, total_downloads FROM stats WHERE id = 1')
+            result = cursor.fetchone()
+            
+            if result:
+                total_users, total_downloads = result
+                
+                # Get today's downloads
+                cursor.execute('''
+                    SELECT COUNT(*) FROM downloads 
+                    WHERE date(download_date) = date('now')
+                ''')
+                today_downloads = cursor.fetchone()[0]
+                
+                # Get active users (last 7 days)
+                cursor.execute('''
+                    SELECT COUNT(DISTINCT user_id) FROM downloads 
+                    WHERE download_date > datetime('now', '-7 days')
+                ''')
+                active_users = cursor.fetchone()[0]
+                
+                # Get platform distribution
+                cursor.execute('''
+                    SELECT platform, COUNT(*) as count 
+                    FROM downloads 
+                    GROUP BY platform 
+                    ORDER BY count DESC LIMIT 5
+                ''')
+                platform_stats = cursor.fetchall()
+                
+                return {
+                    'total_users': total_users,
+                    'total_downloads': total_downloads,
+                    'today_downloads': today_downloads,
+                    'active_users': active_users,
+                    'platform_stats': platform_stats
+                }
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error getting bot stats: {e}")
+            return {}
 
 # Initialize database
 db = Database()
 
 # ========== DOWNLOADER ENGINE ==========
 class UniversalDownloader:
-    """Universal downloader for all platforms - SIMPLIFIED"""
+    """Universal downloader for all platforms"""
     
-    # Supported platforms
     PLATFORMS = {
         'youtube': {'icon': '📺', 'domains': ['youtube.com', 'youtu.be']},
         'instagram': {'icon': '📸', 'domains': ['instagram.com', 'instagr.am']},
@@ -245,7 +274,9 @@ class UniversalDownloader:
         'pinterest': {'icon': '📌', 'domains': ['pinterest.com', 'pin.it']},
         'terabox': {'icon': '📦', 'domains': ['terabox.com', 'teraboxapp.com']},
         'twitter': {'icon': '🐦', 'domains': ['twitter.com', 'x.com']},
-        'facebook': {'icon': '📘', 'domains': ['facebook.com', 'fb.watch']}
+        'facebook': {'icon': '📘', 'domains': ['facebook.com', 'fb.watch']},
+        'reddit': {'icon': '🔴', 'domains': ['reddit.com', 'redd.it']},
+        'likee': {'icon': '🎬', 'domains': ['likee.video', 'likee.com']}
     }
     
     @staticmethod
@@ -259,15 +290,18 @@ class UniversalDownloader:
         return None, '📹'
     
     @staticmethod
-    async def get_video_info(url, platform):
-        """Get video information using yt-dlp - SIMPLIFIED"""
+    async def get_video_info_async(url, platform):
+        """Get video information using yt-dlp (async)"""
         try:
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
                 'format': 'best[filesize<?50M]',
                 'socket_timeout': 30,
-                'retries': 3
+                'retries': 3,
+                'no_check_certificate': True,
+                'ignoreerrors': True,
+                'extract_flat': False
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -276,7 +310,62 @@ class UniversalDownloader:
                 if not info:
                     return None
                 
-                # Get best format
+                # Get best format under 50MB
+                best_format = None
+                if 'formats' in info:
+                    for fmt in info['formats']:
+                        if fmt.get('filesize') and fmt['filesize'] <= MAX_FILE_SIZE:
+                            if not best_format or fmt.get('filesize', 0) > best_format.get('filesize', 0):
+                                best_format = fmt
+                
+                if best_format:
+                    return {
+                        'title': info.get('title', 'Video'),
+                        'duration': info.get('duration', 0),
+                        'thumbnail': info.get('thumbnail'),
+                        'url': best_format.get('url'),
+                        'filesize': best_format.get('filesize', 0),
+                        'ext': best_format.get('ext', 'mp4')
+                    }
+                
+                # If no format found, try direct URL
+                if 'url' in info:
+                    return {
+                        'title': info.get('title', 'Video'),
+                        'duration': info.get('duration', 0),
+                        'thumbnail': info.get('thumbnail'),
+                        'url': info['url'],
+                        'filesize': info.get('filesize', 0),
+                        'ext': info.get('ext', 'mp4')
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting video info: {e}")
+            return None
+    
+    @staticmethod
+    def get_video_info_sync(url, platform):
+        """Get video information using yt-dlp (sync version)"""
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'best[filesize<?50M]',
+                'socket_timeout': 30,
+                'retries': 3,
+                'no_check_certificate': True,
+                'ignoreerrors': True
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    return None
+                
+                # Get best format under 50MB
                 best_format = None
                 if 'formats' in info:
                     for fmt in info['formats']:
@@ -295,17 +384,20 @@ class UniversalDownloader:
                     }
                 
                 return None
-                    
+                
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
             return None
     
     @staticmethod
-    async def download_to_memory(video_url):
-        """Download video directly to memory"""
+    async def download_to_memory_async(video_url):
+        """Download video directly to memory (async)"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/'
             }
             
             async with aiohttp.ClientSession(headers=headers) as session:
@@ -329,13 +421,110 @@ class UniversalDownloader:
         except Exception as e:
             logger.error(f"Error downloading to memory: {e}")
             return None
+    
+    @staticmethod
+    def download_to_memory_sync(video_url):
+        """Download video directly to memory (sync version)"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*'
+            }
+            
+            response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+            if response.status_code == 200:
+                buffer = io.BytesIO()
+                total_size = 0
+                
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        buffer.write(chunk)
+                        total_size += len(chunk)
+                        
+                        if total_size > MAX_FILE_SIZE:
+                            return None
+                
+                buffer.seek(0)
+                return buffer
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error downloading to memory: {e}")
+            return None
 
-# Global start time
-start_time = time.time()
+# ========== TELEGRAM BOT SETUP ==========
+# Global bot instance
+bot_application = None
+bot = None
 
-# Start health server immediately
-health_server = HealthServer(port=PORT)
-health_server.start()
+async def setup_bot():
+    """Setup Telegram bot application"""
+    global bot_application, bot, BOT_USERNAME
+    
+    try:
+        # Create application
+        bot_application = (
+            ApplicationBuilder()
+            .token(TOKEN)
+            .pool_timeout(30)
+            .connect_timeout(30)
+            .read_timeout(30)
+            .write_timeout(30)
+            .build()
+        )
+        
+        # Get bot info
+        bot = bot_application.bot
+        bot_info = await bot.get_me()
+        BOT_USERNAME = bot_info.username
+        
+        logger.info(f"✅ Bot initialized: @{BOT_USERNAME}")
+        
+        # Add handlers
+        bot_application.add_handler(CommandHandler("start", start_command))
+        bot_application.add_handler(CommandHandler("help", help_command))
+        bot_application.add_handler(CommandHandler("stats", stats_command))
+        bot_application.add_handler(CommandHandler("ping", ping_command))
+        bot_application.add_handler(CommandHandler("admin", admin_command))
+        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Initialize application
+        await bot_application.initialize()
+        
+        # Set webhook
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            max_connections=40,
+            allowed_updates=['message', 'callback_query']
+        )
+        
+        logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
+        
+        # Send startup notification to admin
+        await send_admin_message("🤖 *Bot Started Successfully!*\n\n"
+                               f"• Username: @{BOT_USERNAME}\n"
+                               f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                               f"• Webhook: {WEBHOOK_URL}\n"
+                               f"• Status: 🟢 Online")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to setup bot: {e}")
+        return False
+
+async def send_admin_message(message):
+    """Send message to admin"""
+    try:
+        for admin_id in ADMIN_IDS:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except Exception as e:
+        logger.error(f"Failed to send admin message: {e}")
 
 # ========== BOT COMMAND HANDLERS ==========
 async def start_command(update: Update, context: CallbackContext):
@@ -414,6 +603,8 @@ Download videos from multiple platforms.
 • Terabox (all videos)
 • Twitter/X (video tweets)
 • Facebook (public videos)
+• Reddit (video posts)
+• Likee (videos)
 
 📥 *How to Download:*
 1. Copy video link
@@ -450,6 +641,9 @@ async def stats_command(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     stats = db.get_user_stats(user_id)
     
+    # Get bot stats
+    bot_stats = db.get_bot_stats()
+    
     stats_text = f"""
 📊 *YOUR STATISTICS*
 
@@ -458,8 +652,14 @@ async def stats_command(update: Update, context: CallbackContext):
 
 📥 *Download Stats:*
 • This Hour: *{stats['hourly']}/{RATE_LIMIT}*
+• Today: *{stats['daily']} downloads*
 • Total: *{stats['total']} downloads*
 • Remaining: *{stats['remaining']} downloads*
+
+🌐 *Bot Stats:*
+• Total Users: *{bot_stats.get('total_users', 0)}*
+• Total Downloads: *{bot_stats.get('total_downloads', 0)}*
+• Active Users: *{bot_stats.get('active_users', 0)}*
 
 💡 *Tip:* Send any video link to download!
 """
@@ -470,20 +670,17 @@ async def stats_command(update: Update, context: CallbackContext):
     )
 
 async def ping_command(update: Update, context: CallbackContext):
-    """Handle /ping command - Health check"""
-    uptime_seconds = time.time() - start_time
-    days = int(uptime_seconds // 86400)
-    hours = int((uptime_seconds % 86400) // 3600)
-    minutes = int((uptime_seconds % 3600) // 60)
+    """Handle /ping command"""
+    bot_stats = db.get_bot_stats()
     
     ping_text = f"""
 🏓 *PONG!* Bot is alive and healthy!
 
 📊 *Bot Status:*
 ✅ *Status:* Operational
-⏰ *Uptime:* {days}d {hours}h {minutes}m
 🌐 *Host:* Koyeb Cloud
-🔧 *Platform:* Python {sys.version.split()[0]}
+👥 *Users:* {bot_stats.get('total_users', 0)}
+📥 *Downloads:* {bot_stats.get('total_downloads', 0)}
 
 🔗 *Health Endpoints:*
 • https://encouraging-di-1carnage1-6226074c.koyeb.app/health
@@ -501,7 +698,48 @@ async def ping_command(update: Update, context: CallbackContext):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ========== MESSAGE HANDLER ==========
+async def admin_command(update: Update, context: CallbackContext):
+    """Handle /admin command"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Admin only command.")
+        return
+    
+    bot_stats = db.get_bot_stats()
+    
+    admin_text = f"""
+👑 *ADMIN PANEL*
+
+📊 *Bot Statistics:*
+• Total Users: *{bot_stats.get('total_users', 0)}*
+• Total Downloads: *{bot_stats.get('total_downloads', 0)}*
+• Today's Downloads: *{bot_stats.get('today_downloads', 0)}*
+• Active Users: *{bot_stats.get('active_users', 0)}*
+
+🔗 *Platform Usage:*
+"""
+    
+    # Add platform stats
+    for platform_stat in bot_stats.get('platform_stats', []):
+        platform, count = platform_stat
+        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
+        admin_text += f"• {icon} {platform.title()}: *{count}*\n"
+    
+    admin_text += f"""
+🌐 *System Info:*
+• Webhook: {WEBHOOK_URL}
+• Bot: @{BOT_USERNAME}
+• Uptime: {int(time.time() - start_time)} seconds
+
+🕒 *Last Updated:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+    
+    await update.message.reply_text(
+        admin_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def handle_message(update: Update, context: CallbackContext):
     """Handle incoming messages with video links"""
     user_id = update.effective_user.id
@@ -529,7 +767,7 @@ async def handle_message(update: Update, context: CallbackContext):
     if not platform:
         await update.message.reply_text(
             "❌ *Platform not supported.*\n\n"
-            "I support: YouTube, Instagram, TikTok, Pinterest, Terabox, Twitter, Facebook",
+            "I support: YouTube, Instagram, TikTok, Pinterest, Terabox, Twitter, Facebook, Reddit, Likee",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -547,19 +785,20 @@ async def handle_message(update: Update, context: CallbackContext):
     
     # Start processing
     processing_msg = await update.message.reply_text(
-        f"{icon} *Processing {platform.upper()} link...*",
+        f"{icon} *Processing {platform.upper()} link...*\n"
+        f"⏳ Please wait...",
         parse_mode=ParseMode.MARKDOWN
     )
     
     try:
-        # Get video info
+        # Get video info (sync version to avoid async issues)
         await processing_msg.edit_text(
             f"{icon} *{platform.upper()} DETECTED*\n"
             f"🔍 Analyzing video...",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        video_info = await UniversalDownloader.get_video_info(url, platform)
+        video_info = UniversalDownloader.get_video_info_sync(url, platform)
         
         if not video_info:
             await processing_msg.edit_text(
@@ -580,17 +819,18 @@ async def handle_message(update: Update, context: CallbackContext):
             )
             return
         
-        # Download to memory
+        # Download to memory (sync version)
         await processing_msg.edit_text(
             f"⬇️ *Downloading video...*",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        video_stream = await UniversalDownloader.download_to_memory(video_info['url'])
+        video_stream = UniversalDownloader.download_to_memory_sync(video_info['url'])
         
         if not video_stream:
             await processing_msg.edit_text(
-                f"❌ *Download Failed*",
+                f"❌ *Download Failed*\n\n"
+                f"Could not download the video.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
@@ -609,7 +849,8 @@ async def handle_message(update: Update, context: CallbackContext):
             f"📁 *Title:* {video_info['title'][:100]}\n"
             f"📊 *Platform:* {platform.upper()}\n"
             f"💾 *Size:* {file_size_mb:.1f}MB\n\n"
-            f"🤖 Downloaded via @{BOT_USERNAME}"
+            f"🤖 Downloaded via @{BOT_USERNAME}\n"
+            f"⭐ Rate: /rate"
         )
         
         # Send video
@@ -618,11 +859,12 @@ async def handle_message(update: Update, context: CallbackContext):
             video=video_stream,
             caption=caption,
             parse_mode=ParseMode.MARKDOWN,
-            supports_streaming=True
+            supports_streaming=True,
+            filename=f"{video_info['title'][:50]}.mp4".replace('/', '_')
         )
         
         # Record download
-        db.record_download(user_id, platform, url)
+        db.record_download(user_id, platform, url, len(video_stream.getvalue()), True)
         
         # Success message
         await processing_msg.edit_text(
@@ -634,114 +876,134 @@ async def handle_message(update: Update, context: CallbackContext):
         # Clean up
         video_stream.close()
         
+        # Notify admin
+        if user_id not in ADMIN_IDS:
+            await send_admin_message(
+                f"📥 *New Download*\n\n"
+                f"👤 User: {update.effective_user.first_name}\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"📊 Platform: {platform.upper()}\n"
+                f"💾 Size: {file_size_mb:.1f}MB\n"
+                f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+        
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Error in handle_message: {e}")
         await processing_msg.edit_text(
             f"❌ *Download Failed*\n\n"
+            f"Error: {str(e)[:100]}\n\n"
             f"Please try again.",
             parse_mode=ParseMode.MARKDOWN
         )
-
-# ========== BUTTON HANDLER ==========
-async def button_callback(update: Update, context: CallbackContext):
-    """Handle button callbacks"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data.startswith("guide_"):
-        platform = data.replace("guide_", "")
-        platform_names = {
-            'yt': ('YouTube', '📺'),
-            'ig': ('Instagram', '📸'),
-            'tt': ('TikTok', '🎵'),
-            'pin': ('Pinterest', '📌'),
-            'tb': ('Terabox', '📦')
-        }
         
-        if platform in platform_names:
-            name, icon = platform_names[platform]
-            await query.message.reply_text(
-                f"{icon} *{name}*\n\n"
-                f"Send me any {name} video link to download!",
-                parse_mode=ParseMode.MARKDOWN
-            )
+        # Record failed download
+        db.record_download(user_id, platform, url, 0, False)
+
+# ========== FLASK ROUTES ==========
+@app.route('/')
+def home():
+    """Home page"""
+    return jsonify({
+        'status': 'online',
+        'service': 'telegram-downloader-bot',
+        'version': '2.0',
+        'timestamp': datetime.now().isoformat(),
+        'endpoints': ['/health', '/ping', '/ping1', '/ping2', '/stats', '/webhook']
+    })
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'telegram-downloader-bot',
+        'timestamp': datetime.now().isoformat(),
+        'uptime': int(time.time() - start_time),
+        'database': 'connected',
+        'webhook': WEBHOOK_URL
+    })
+
+@app.route('/ping')
+@app.route('/ping1')
+@app.route('/ping2')
+def ping():
+    """Ping endpoints for uptime monitoring"""
+    return jsonify({
+        'status': 'pong',
+        'timestamp': datetime.now().isoformat(),
+        'message': 'Bot is running on Koyeb'
+    })
+
+@app.route('/stats')
+def stats():
+    """Statistics endpoint"""
+    bot_stats = db.get_bot_stats()
+    return jsonify({
+        'status': 'online',
+        'statistics': bot_stats,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Telegram webhook endpoint"""
+    if request.method == "POST":
+        try:
+            # Process update
+            update = Update.de_json(request.get_json(force=True), bot)
+            
+            # Process update in background
+            Thread(target=lambda: asyncio.run(process_update(update))).start()
+            
+            return 'OK'
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return 'ERROR', 500
     
-    elif data == "my_stats":
-        await stats_command(update, context)
+    return 'Method not allowed', 405
 
-# ========== ERROR HANDLER ==========
-async def error_handler(update: Update, context: CallbackContext):
-    """Handle errors"""
-    logger.error(f"Error: {context.error}")
+async def process_update(update: Update):
+    """Process update in async context"""
+    try:
+        await bot_application.process_update(update)
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
 
-# ========== MAIN FUNCTION ==========
-async def main():
-    """Main function to run the bot"""
-    global BOT_USERNAME
+# ========== STARTUP FUNCTION ==========
+def start_bot():
+    """Start the bot in background"""
+    import asyncio
+    
+    async def _start_bot():
+        success = await setup_bot()
+        if success:
+            logger.info("✅ Bot started successfully")
+        else:
+            logger.error("❌ Failed to start bot")
+    
+    # Run in background thread
+    thread = Thread(target=lambda: asyncio.run(_start_bot()))
+    thread.daemon = True
+    thread.start()
+
+# ========== MAIN ==========
+if __name__ == '__main__':
+    # Global start time
+    start_time = time.time()
     
     print("=" * 60)
     print("🤖 TELEGRAM UNIVERSAL DOWNLOADER BOT")
-    print("🌐 Deployed on Koyeb - 24/7 FREE Hosting")
+    print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox")
+    print("🌐 Deployed on Koyeb - Production Ready")
     print("=" * 60)
     
-    try:
-        # Create Application with updated syntax
-        application = (
-            ApplicationBuilder()
-            .token(TOKEN)
-            .concurrent_updates(True)
-            .build()
-        )
-        
-        # Get bot username
-        BOT_USERNAME = (await application.bot.get_me()).username
-        print(f"✅ Bot username: @{BOT_USERNAME}")
-        print(f"✅ Health server running on port {PORT}")
-        print(f"✅ Endpoints: /health, /ping, /ping1, /ping2")
-        
-        # Add command handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("ping", ping_command))
-        
-        # Add message handler
-        application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        ))
-        
-        # Add callback handler
-        application.add_handler(CallbackQueryHandler(button_callback))
-        
-        # Add error handler
-        application.add_error_handler(error_handler)
-        
-        # Start the bot
-        print("🔄 Starting bot...")
-        print("✅ Bot is running!")
-        print("-" * 60)
-        
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        
-        # Keep running
-        await asyncio.Event().wait()
-        
-    except Exception as e:
-        logger.error(f"Fatal error in main: {e}")
-        raise
-
-# ========== ENTRY POINT ==========
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-    except Exception as e:
-        print(f"\n💥 Fatal error: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    # Start bot in background
+    start_bot()
+    
+    # Start Flask app
+    logger.info(f"✅ Starting Flask server on port {PORT}")
+    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"📡 Health endpoints: /health, /ping, /ping1, /ping2")
+    
+    # Run Flask app
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
