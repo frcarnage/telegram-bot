@@ -44,7 +44,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB Telegram limit
 RATE_LIMIT = 10  # Downloads per hour for free users
 PREMIUM_RATE_LIMIT = 50  # Downloads per hour for premium users
 PREMIUM_MAX_SIZE = 200 * 1024 * 1024  # 200MB for premium
-PORT = int(os.environ.get("PORT", 8000))  # Koyeb uses 8000, not 8080
+PORT = int(os.environ.get("PORT", 8000))  # Koyeb uses 8000
 
 # Get Koyeb URL from environment
 KOYEB_APP_URL = os.environ.get("KOYEB_APP_URL", "https://encouraging-di-1carnage1-6226074c.koyeb.app")
@@ -1187,6 +1187,264 @@ def handle_stats(user_id, first_name):
     
     return send_telegram_message(user_id, stats_text, parse_mode='HTML', reply_markup=keyboard)
 
+def handle_history(user_id, page=1):
+    """Handle /history command"""
+    history = db.get_download_history(user_id, limit=50)
+    
+    if not history:
+        return send_telegram_message(user_id, "📭 <b>No download history found.</b>\n\nStart by sending me a video link!", parse_mode='HTML')
+    
+    # Paginate
+    items_per_page = 10
+    total_pages = (len(history) + items_per_page - 1) // items_per_page
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_items = history[start_idx:end_idx]
+    
+    history_text = f"""
+<b>📋 DOWNLOAD HISTORY</b>
+
+📊 <b>Total Downloads:</b> {len(history)}
+📄 <b>Page:</b> {page}/{total_pages}
+
+"""
+    
+    for idx, item in enumerate(page_items, start=start_idx + 1):
+        item_id, platform, url, title, thumbnail, download_date, file_size, quality = item
+        
+        # Format date
+        try:
+            dt = datetime.strptime(download_date, '%Y-%m-%d %H:%M:%S')
+            date_str = dt.strftime('%b %d, %H:%M')
+        except:
+            date_str = download_date
+        
+        # Truncate title
+        display_title = title[:30] + "..." if len(title) > 30 else title
+        
+        # Format size
+        size_mb = file_size / (1024 * 1024) if file_size else 0
+        
+        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
+        
+        history_text += f"""<b>{idx}.</b> {icon} <b>{platform.upper()}</b>
+├─ <b>Title:</b> {display_title}
+├─ <b>Quality:</b> {quality}
+├─ <b>Size:</b> {size_mb:.1f}MB
+├─ <b>Date:</b> {date_str}
+└─ <b>Link:</b> <code>{url[:30]}...</code>
+
+"""
+    
+    keyboard_buttons = []
+    
+    # Navigation buttons
+    if page > 1:
+        keyboard_buttons.append({'text': '⬅️ Previous', 'callback_data': f'history_{page-1}'})
+    
+    if page < total_pages:
+        keyboard_buttons.append({'text': 'Next ➡️', 'callback_data': f'history_{page+1}'})
+    
+    # Other buttons
+    other_buttons = [
+        {'text': '🗑️ Clear History', 'callback_data': 'clear_history'},
+        {'text': '📊 Stats', 'callback_data': 'my_stats'},
+        {'text': '🚀 New Download', 'switch_inline_query_current_chat': ''}
+    ]
+    
+    keyboard = {
+        'inline_keyboard': [keyboard_buttons] if keyboard_buttons else [] + [other_buttons]
+    }
+    
+    return send_telegram_message(user_id, history_text, parse_mode='HTML', reply_markup=keyboard)
+
+def handle_premium_info(user_id):
+    """Handle /premium command"""
+    is_premium = db.is_premium_user(user_id)
+    
+    premium_text = f"""
+<b>⭐ PREMIUM SUBSCRIPTION</b>
+
+{'🎉 <b>YOU ARE A PREMIUM USER!</b> 🎉' if is_premium else '🆓 <b>FREE ACCOUNT</b>'}
+{'<i>Thank you for supporting us!</i>' if is_premium else ''}
+
+<b>Premium Features:</b>
+✅ <b>200MB</b> file size limit (Free: 50MB)
+✅ <b>{PREMIUM_RATE_LIMIT}</b> downloads/hour (Free: {RATE_LIMIT})
+✅ <b>Video Compression</b> tool
+✅ <b>Priority Processing</b>
+✅ <b>Custom Quality Selection</b>
+✅ <b>Batch Downloading</b>
+✅ <b>Priority Support</b>
+
+<b>Pricing:</b>
+💰 <b>1 Month:</b> Contact Admin
+💰 <b>3 Months:</b> Contact Admin
+💰 <b>6 Months:</b> Contact Admin
+💰 <b>1 Year:</b> Contact Admin
+
+<b>How to Upgrade:</b>
+1. Contact admin @Tg_AssistBot
+2. Make payment
+3. Admin will activate premium
+4. Enjoy all features!
+
+<b>Your Status:</b>
+"""
+    
+    if is_premium:
+        stats = db.get_user_stats(user_id)
+        if stats['premium_until']:
+            try:
+                until_dt = datetime.strptime(stats['premium_until'], '%Y-%m-%d %H:%M:%S')
+                days_left = (until_dt - datetime.now()).days
+                premium_text += f"✅ <b>Active until:</b> {until_dt.strftime('%b %d, %Y')}\n"
+                premium_text += f"⏳ <b>Days remaining:</b> {days_left}\n"
+            except:
+                premium_text += "✅ <b>Premium Active</b>\n"
+    else:
+        premium_text += "❌ <b>Not Premium</b>\n💡 <i>Contact admin to upgrade!</i>\n"
+    
+    premium_text += f"""
+📞 <b>Contact Admin:</b> @Tg_AssistBot
+
+<i>All payments are secure and one-time only.
+No automatic renewals.</i>
+"""
+    
+    keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'},
+                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
+            ],
+            [
+                {'text': '🔄 Refresh Status', 'callback_data': 'refresh_premium'},
+                {'text': '🚀 Try Download', 'switch_inline_query_current_chat': ''}
+            ]
+        ]
+    }
+    
+    return send_telegram_message(user_id, premium_text, parse_mode='HTML', reply_markup=keyboard)
+
+def handle_features(user_id):
+    """Handle /features command"""
+    features_text = """
+<b>🛠️ ALL FEATURES</b>
+
+<b>📥 Core Features:</b>
+✅ Download from 15+ platforms
+✅ Best quality auto-selection
+✅ No storage on servers
+✅ Fast processing
+✅ Free forever
+
+<b>⭐ Premium Features:</b>
+✅ 200MB file size limit
+✅ 50 downloads/hour
+✅ Video compression
+✅ Custom quality selection
+✅ Priority processing
+✅ Batch downloading
+✅ Priority support
+
+<b>🔄 Processing Features:</b>
+✅ Progress bar display
+✅ Real-time status updates
+✅ Automatic format detection
+✅ Multi-threaded downloads
+✅ Error recovery
+
+<b>📊 Analytics Features:</b>
+✅ Download history
+✅ User statistics
+✅ Platform usage stats
+✅ Hourly/daily/weekly reports
+✅ Leaderboards
+
+<b>🔧 Admin Features:</b>
+✅ User management
+✅ Premium management
+✅ Bot statistics
+✅ Broadcast messages
+✅ Ad management
+
+<b>🛡️ Security Features:</b>
+✅ Rate limiting
+✅ Ban system
+✅ Link validation
+✅ File size limits
+✅ Privacy protection
+
+<b>🌐 Platform Support:</b>
+✅ YouTube, Instagram, TikTok
+✅ Pinterest, Terabox, Twitter
+✅ Facebook, Reddit, Likee
+✅ Dailymotion, Vimeo, Twitch
+✅ Bilibili, Rutube, and more!
+"""
+    
+    keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '⭐ Go Premium', 'callback_data': 'premium_info'},
+                {'text': '📖 Help Guide', 'callback_data': 'help_menu'}
+            ],
+            [
+                {'text': '🚀 Start Downloading', 'switch_inline_query_current_chat': ''},
+                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
+            ]
+        ]
+    }
+    
+    return send_telegram_message(user_id, features_text, parse_mode='HTML', reply_markup=keyboard)
+
+def handle_tools_menu(user_id):
+    """Handle /tools command - Show premium tools menu"""
+    is_premium = db.is_premium_user(user_id)
+    
+    if not is_premium:
+        return send_telegram_message(user_id, "❌ <b>Premium Tools</b>\n\nThis feature is available only for premium users.\n\nContact admin @Tg_AssistBot to upgrade to premium!", parse_mode='HTML')
+    
+    tools_text = """
+<b>🛠️ PREMIUM TOOLS</b>
+
+<b>Available Tools:</b>
+
+1. <b>🎞️ Video Compression</b>
+   Reduce video file size while maintaining quality
+   • Options: High, Medium, Low compression
+   • Maintains original resolution
+   • Fast processing
+
+<b>How to use:</b>
+1. First download a video
+2. Use the tools button below the video
+3. Select desired tool
+4. Process and receive result
+
+<i>All tools are available only for premium users.</i>
+"""
+    
+    keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '🎞️ Compress Video', 'callback_data': 'compress_info'},
+                {'text': '📥 Download Video', 'switch_inline_query_current_chat': ''}
+            ],
+            [
+                {'text': '📊 My Stats', 'callback_data': 'my_stats'},
+                {'text': '⭐ Premium Info', 'callback_data': 'premium_info'}
+            ],
+            [
+                {'text': '📖 Help Guide', 'callback_data': 'help_menu'},
+                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
+            ]
+        ]
+    }
+    
+    return send_telegram_message(user_id, tools_text, parse_mode='HTML', reply_markup=keyboard)
+
 def handle_ping(user_id):
     """Handle /ping command"""
     bot_stats = db.get_bot_stats()
@@ -1622,7 +1880,7 @@ def process_webhook_update(data):
                             target_id = int(parts[1])
                             reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
                             if db.unban_user(target_id, user_id, reason):
-                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been unbanned.", parse_mode='HTML")
+                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been unbanned.", parse_mode='HTML')
                             else:
                                 send_telegram_message(user_id, f"❌ Failed to unban user <code>{target_id}</code>.", parse_mode='HTML')
                 elif command.startswith('/broadcast'):
@@ -1790,7 +2048,7 @@ def initialize_bot():
     start_time = time.time()
     
     print("=" * 60)
-    print("🤖 TELEGRAM UNIVERSAL DOWNLOADER BOT - PREMIUM EDITION")
+    print("🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT - PREMIUM EDITION")
     print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox • 15+ Platforms")
     print("⭐ Premium Features • Analytics • Compression")
     print("🌐 Deployed on Koyeb - Production Ready")
