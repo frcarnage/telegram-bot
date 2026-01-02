@@ -1,1 +1,1 @@
-web: koyeb_bot.py
+web: python koyeb_bot.py
