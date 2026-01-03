@@ -1,2396 +1,918 @@
-#!/usr/bin/env python3
-"""
-🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT - PREMIUM EDITION
-📥 YouTube, Instagram, TikTok, Pinterest, Terabox + 15+ Platforms
-⭐ Premium Features • Analytics • Compression
-🌐 Deployed on Koyeb - Production Ready
-"""
-
 import os
-import sys
-import logging
-import re
-import json
+import requests
+import base64
+import telebot
+from telebot import types
 import time
-import hashlib
-import threading
-import random
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-import io
 import sqlite3
-import traceback
-import math
-import subprocess
-from pathlib import Path
-import tempfile
-import zipfile
-from concurrent.futures import ThreadPoolExecutor
-
-# Flask imports
-from flask import Flask, request, jsonify
-from threading import Thread
-import requests as http_requests
-
-# Third-party imports
-import yt_dlp
-from urllib.parse import urlparse, unquote, quote
+import json
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request, render_template_string
+import logging
+import threading
+import csv
+import io
+import sys
+import hashlib
 
 # ========== CONFIGURATION ==========
-TOKEN = "7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c"
-ADMIN_IDS = [7575087826]  # Your admin ID
-BOT_USERNAME = ""
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB Telegram limit
-RATE_LIMIT = 10  # Downloads per hour for free users
-PREMIUM_RATE_LIMIT = 50  # Downloads per hour for premium users
-PREMIUM_MAX_SIZE = 200 * 1024 * 1024  # 200MB for premium
-PORT = int(os.environ.get("PORT", 8000))  # Koyeb uses 8000
-
-# Get Koyeb URL from environment
-KOYEB_APP_URL = os.environ.get("KOYEB_APP_URL", "https://encouraging-di-1carnage1-6226074c.koyeb.app")
-WEBHOOK_URL = f"{KOYEB_APP_URL}/webhook"
-
-print(f"🔧 Configuration:")
-print(f"📱 Bot Token: {TOKEN[:10]}...")
-print(f"🌐 Webhook URL: {WEBHOOK_URL}")
-print(f"🔌 Port: {PORT}")
-print(f"👑 Admin IDs: {ADMIN_IDS}")
-
-# ========== LOGGING SETUP ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# ========== DATABASE SETUP ==========
-class Database:
-    """SQLite database handler with premium features"""
-    
-    def __init__(self):
-        self.db_file = "bot_database.db"
-        self.setup_database()
-    
-    def setup_database(self):
-        """Setup SQLite database with tables"""
-        try:
-            self.conn = sqlite3.connect(self.db_file, check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.cursor()
-            
-            # Users table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    downloads INTEGER DEFAULT 0,
-                    last_download TIMESTAMP,
-                    is_banned INTEGER DEFAULT 0,
-                    rating INTEGER DEFAULT 0,
-                    is_premium INTEGER DEFAULT 0,
-                    premium_until TIMESTAMP,
-                    total_premium_days INTEGER DEFAULT 0
-                )
-            ''')
-            
-            # Downloads table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS downloads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    platform TEXT,
-                    url TEXT,
-                    title TEXT,
-                    file_size INTEGER,
-                    quality TEXT,
-                    download_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    success INTEGER DEFAULT 1,
-                    compressed INTEGER DEFAULT 0,
-                    is_premium INTEGER DEFAULT 0
-                )
-            ''')
-            
-            # Admin logs table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS admin_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    admin_id INTEGER,
-                    action TEXT,
-                    target_id INTEGER,
-                    details TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Platform stats table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS platform_stats (
-                    platform TEXT PRIMARY KEY,
-                    download_count INTEGER DEFAULT 0,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Video history table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS video_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    platform TEXT,
-                    url TEXT,
-                    title TEXT,
-                    thumbnail TEXT,
-                    download_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    file_size INTEGER,
-                    quality TEXT,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            ''')
-            
-            # Analytics table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS analytics (
-                    date DATE PRIMARY KEY,
-                    total_downloads INTEGER DEFAULT 0,
-                    total_users INTEGER DEFAULT 0,
-                    premium_downloads INTEGER DEFAULT 0
-                )
-            ''')
-            
-            # Ads table (admin managed)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS ads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ad_type TEXT,
-                    content TEXT,
-                    url TEXT,
-                    impressions INTEGER DEFAULT 0,
-                    clicks INTEGER DEFAULT 0,
-                    is_active INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Initialize platforms
-            platforms = ['youtube', 'instagram', 'tiktok', 'pinterest', 'terabox', 
-                        'twitter', 'facebook', 'reddit', 'likee', 'snackvideo',
-                        'dailymotion', 'vimeo', 'twitch', 'bilibili', 'rutube']
-            for platform in platforms:
-                cursor.execute('INSERT OR IGNORE INTO platform_stats (platform) VALUES (?)', (platform,))
-            
-            self.conn.commit()
-            logger.info("✅ Database setup complete with premium features")
-            
-        except Exception as e:
-            logger.error(f"❌ Database setup failed: {e}")
-    
-    def add_user(self, user_id, username, first_name):
-        """Add or update user in database"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, username, first_name, join_date)
-                VALUES (?, ?, ?, COALESCE((SELECT join_date FROM users WHERE user_id = ?), CURRENT_TIMESTAMP))
-            ''', (user_id, username, first_name, user_id))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error adding user: {e}")
-            return False
-    
-    def get_user_stats(self, user_id):
-        """Get user download statistics"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # Check if premium
-            cursor.execute('SELECT is_premium, premium_until FROM users WHERE user_id = ?', (user_id,))
-            user_data = cursor.fetchone()
-            is_premium = user_data[0] if user_data else 0
-            premium_until = user_data[1] if user_data and user_data[1] else None
-            
-            # Get hourly downloads
-            cursor.execute('''
-                SELECT COUNT(*) FROM downloads 
-                WHERE user_id = ? 
-                AND download_date > datetime('now', '-1 hour')
-            ''', (user_id,))
-            hourly = cursor.fetchone()[0]
-            
-            # Get daily downloads
-            cursor.execute('''
-                SELECT COUNT(*) FROM downloads 
-                WHERE user_id = ? 
-                AND date(download_date) = date('now')
-            ''', (user_id,))
-            daily = cursor.fetchone()[0]
-            
-            # Get weekly downloads
-            cursor.execute('''
-                SELECT COUNT(*) FROM downloads 
-                WHERE user_id = ? 
-                AND download_date > datetime('now', '-7 days')
-            ''', (user_id,))
-            weekly = cursor.fetchone()[0]
-            
-            # Get total downloads
-            cursor.execute('SELECT downloads FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            total = result[0] if result else 0
-            
-            # Get last download
-            cursor.execute('SELECT MAX(download_date) FROM downloads WHERE user_id = ?', (user_id,))
-            last_download = cursor.fetchone()[0]
-            
-            # Get rate limit
-            rate_limit = PREMIUM_RATE_LIMIT if is_premium else RATE_LIMIT
-            remaining = max(0, rate_limit - hourly)
-            
-            return {
-                'hourly': hourly,
-                'daily': daily,
-                'weekly': weekly,
-                'total': total,
-                'remaining': remaining,
-                'last_download': last_download,
-                'is_premium': bool(is_premium),
-                'premium_until': premium_until,
-                'rate_limit': rate_limit
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting user stats: {e}")
-            return {'hourly': 0, 'daily': 0, 'weekly': 0, 'total': 0, 'remaining': RATE_LIMIT, 
-                   'last_download': None, 'is_premium': False, 'premium_until': None, 'rate_limit': RATE_LIMIT}
-    
-    def record_download(self, user_id, platform, url, title, file_size, quality, success=True, compressed=False):
-        """Record a download attempt"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # Check if premium
-            cursor.execute('SELECT is_premium FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            is_premium = result[0] if result else 0
-            
-            # Record download
-            cursor.execute('''
-                INSERT INTO downloads (user_id, platform, url, title, file_size, quality, success, compressed, is_premium)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, platform, url, title, file_size, quality, 1 if success else 0, 
-                  1 if compressed else 0, is_premium))
-            
-            # Add to video history
-            if success:
-                cursor.execute('''
-                    INSERT INTO video_history (user_id, platform, url, title, file_size, quality)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (user_id, platform, url, title, file_size, quality))
-            
-            # Update user download count
-            if success:
-                cursor.execute('''
-                    UPDATE users 
-                    SET downloads = downloads + 1, 
-                        last_download = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                ''', (user_id,))
-            
-            # Update platform stats
-            if success:
-                cursor.execute('''
-                    UPDATE platform_stats 
-                    SET download_count = download_count + 1,
-                        last_updated = CURRENT_TIMESTAMP
-                    WHERE platform = ?
-                ''', (platform,))
-            
-            # Update analytics
-            today = datetime.now().strftime('%Y-%m-%d')
-            cursor.execute('''
-                INSERT OR IGNORE INTO analytics (date) VALUES (?)
-            ''', (today,))
-            
-            cursor.execute('''
-                UPDATE analytics 
-                SET total_downloads = total_downloads + 1,
-                    premium_downloads = premium_downloads + ?
-                WHERE date = ?
-            ''', (1 if is_premium else 0, today))
-            
-            self.conn.commit()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error recording download: {e}")
-            return False
-    
-    def get_download_history(self, user_id, limit=20):
-        """Get user's download history"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT id, platform, url, title, thumbnail, download_date, file_size, quality
-                FROM video_history 
-                WHERE user_id = ?
-                ORDER BY download_date DESC
-                LIMIT ?
-            ''', (user_id, limit))
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting download history: {e}")
-            return []
-    
-    def add_premium(self, user_id, days, admin_id):
-        """Add premium subscription to user"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # Get current premium status
-            cursor.execute('SELECT premium_until FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            
-            if result and result[0]:
-                current_until = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
-                new_until = current_until + timedelta(days=days)
-            else:
-                new_until = datetime.now() + timedelta(days=days)
-            
-            # Update user
-            cursor.execute('''
-                UPDATE users 
-                SET is_premium = 1,
-                    premium_until = ?,
-                    total_premium_days = total_premium_days + ?
-                WHERE user_id = ?
-            ''', (new_until.strftime('%Y-%m-%d %H:%M:%S'), days, user_id))
-            
-            # Log admin action
-            cursor.execute('''
-                INSERT INTO admin_logs (admin_id, action, target_id, details)
-                VALUES (?, 'add_premium', ?, ?)
-            ''', (admin_id, user_id, f'{days} days'))
-            
-            self.conn.commit()
-            return True, new_until
-        except Exception as e:
-            logger.error(f"Error adding premium: {e}")
-            return False, None
-    
-    def remove_premium(self, user_id, admin_id, reason=""):
-        """Remove premium subscription from user"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                UPDATE users 
-                SET is_premium = 0,
-                    premium_until = NULL
-                WHERE user_id = ?
-            ''', (user_id,))
-            
-            # Log admin action
-            cursor.execute('''
-                INSERT INTO admin_logs (admin_id, action, target_id, details)
-                VALUES (?, 'remove_premium', ?, ?)
-            ''', (admin_id, user_id, reason))
-            
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error removing premium: {e}")
-            return False
-    
-    def get_premium_users(self):
-        """Get all premium users"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT user_id, username, first_name, premium_until, total_premium_days, downloads
-                FROM users 
-                WHERE is_premium = 1
-                ORDER BY premium_until DESC
-            ''')
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting premium users: {e}")
-            return []
-    
-    def is_premium_user(self, user_id):
-        """Check if user is premium"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT is_premium, premium_until FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            
-            if result and result[0]:
-                if result[1]:
-                    premium_until = datetime.strptime(result[1], '%Y-%m-%d %H:%M:%S')
-                    if premium_until < datetime.now():
-                        # Premium expired
-                        cursor.execute('UPDATE users SET is_premium = 0, premium_until = NULL WHERE user_id = ?', (user_id,))
-                        self.conn.commit()
-                        return False
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error checking premium status: {e}")
-            return False
-    
-    def get_all_users(self, limit=100):
-        """Get all users"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT user_id, username, first_name, downloads, 
-                       last_download, is_banned, join_date, is_premium
-                FROM users 
-                ORDER BY join_date DESC
-                LIMIT ?
-            ''', (limit,))
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting all users: {e}")
-            return []
-    
-    def ban_user(self, user_id, admin_id, reason=""):
-        """Ban a user"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
-            
-            # Log admin action
-            cursor.execute('''
-                INSERT INTO admin_logs (admin_id, action, target_id, details)
-                VALUES (?, 'ban', ?, ?)
-            ''', (admin_id, user_id, reason))
-            
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error banning user: {e}")
-            return False
-    
-    def unban_user(self, user_id, admin_id, reason=""):
-        """Unban a user"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (user_id,))
-            
-            # Log admin action
-            cursor.execute('''
-                INSERT INTO admin_logs (admin_id, action, target_id, details)
-                VALUES (?, 'unban', ?, ?)
-            ''', (admin_id, user_id, reason))
-            
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error unbanning user: {e}")
-            return False
-    
-    def is_user_banned(self, user_id):
-        """Check if user is banned"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT is_banned FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            return result[0] if result else False
-        except Exception as e:
-            logger.error(f"Error checking ban status: {e}")
-            return False
-    
-    def get_bot_stats(self):
-        """Get overall bot statistics"""
-        try:
-            cursor = self.conn.cursor()
-            
-            # Total users
-            cursor.execute('SELECT COUNT(*) FROM users')
-            total_users = cursor.fetchone()[0]
-            
-            # Active users (last 7 days)
-            cursor.execute('''
-                SELECT COUNT(DISTINCT user_id) FROM downloads 
-                WHERE download_date > datetime('now', '-7 days')
-            ''')
-            active_users = cursor.fetchone()[0]
-            
-            # Banned users
-            cursor.execute('SELECT COUNT(*) FROM users WHERE is_banned = 1')
-            banned_users = cursor.fetchone()[0]
-            
-            # Total downloads
-            cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 1')
-            total_downloads = cursor.fetchone()[0]
-            
-            # Today's downloads
-            cursor.execute('''
-                SELECT COUNT(*) FROM downloads 
-                WHERE date(download_date) = date('now') AND success = 1
-            ''')
-            today_downloads = cursor.fetchone()[0]
-            
-            # Platform distribution
-            cursor.execute('SELECT platform, download_count FROM platform_stats ORDER BY download_count DESC')
-            platform_stats = cursor.fetchall()
-            
-            # Premium users count
-            cursor.execute('SELECT COUNT(*) FROM users WHERE is_premium = 1')
-            premium_users = cursor.fetchone()[0]
-            
-            return {
-                'total_users': total_users,
-                'active_users': active_users,
-                'banned_users': banned_users,
-                'premium_users': premium_users,
-                'total_downloads': total_downloads,
-                'today_downloads': today_downloads,
-                'platform_stats': platform_stats
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting bot stats: {e}")
-            return {}
-    
-    def add_rating(self, user_id, rating):
-        """Add user rating"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('UPDATE users SET rating = ? WHERE user_id = ?', (rating, user_id))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error adding rating: {e}")
-            return False
-    
-    # Ads management methods
-    def create_ad(self, ad_type, content, url):
-        """Create a new ad"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT INTO ads (ad_type, content, url, is_active)
-                VALUES (?, ?, ?, 1)
-            ''', (ad_type, content, url))
-            self.conn.commit()
-            return cursor.lastrowid
-        except Exception as e:
-            logger.error(f"Error creating ad: {e}")
-            return None
-    
-    def get_ads(self, active_only=True):
-        """Get all ads"""
-        try:
-            cursor = self.conn.cursor()
-            if active_only:
-                cursor.execute('SELECT * FROM ads WHERE is_active = 1 ORDER BY created_at DESC')
-            else:
-                cursor.execute('SELECT * FROM ads ORDER BY created_at DESC')
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting ads: {e}")
-            return []
-    
-    def toggle_ad(self, ad_id, active):
-        """Toggle ad status"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('UPDATE ads SET is_active = ? WHERE id = ?', (1 if active else 0, ad_id))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error toggling ad: {e}")
-            return False
-    
-    def delete_ad(self, ad_id):
-        """Delete an ad"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('DELETE FROM ads WHERE id = ?', (ad_id,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting ad: {e}")
-            return False
-
-# Initialize database
-db = Database()
-
-# ========== DOWNLOADER ENGINE ==========
-class UniversalDownloader:
-    """Universal downloader with premium features"""
-    
-    PLATFORMS = {
-        'youtube': {'icon': '📺', 'domains': ['youtube.com', 'youtu.be', 'm.youtube.com', 'www.youtube.com']},
-        'instagram': {'icon': '📸', 'domains': ['instagram.com', 'instagr.am', 'www.instagram.com']},
-        'tiktok': {'icon': '🎵', 'domains': ['tiktok.com', 'vm.tiktok.com', 'www.tiktok.com', 'vt.tiktok.com']},
-        'pinterest': {'icon': '📌', 'domains': ['pinterest.com', 'pin.it', 'www.pinterest.com']},
-        'terabox': {'icon': '📦', 'domains': ['terabox.com', 'teraboxapp.com', 'www.terabox.com', 'teraboxurl.com']},
-        'twitter': {'icon': '🐦', 'domains': ['twitter.com', 'x.com', 'www.twitter.com', 'www.x.com']},
-        'facebook': {'icon': '📘', 'domains': ['facebook.com', 'fb.watch', 'www.facebook.com', 'm.facebook.com']},
-        'reddit': {'icon': '🔴', 'domains': ['reddit.com', 'redd.it', 'www.reddit.com', 'v.redd.it']},
-        'likee': {'icon': '🎬', 'domains': ['likee.video', 'likee.com', 'www.likee.com']},
-        'snackvideo': {'icon': '🎥', 'domains': ['snackvideo.com', 'www.snackvideo.com']},
-        'dailymotion': {'icon': '🎞️', 'domains': ['dailymotion.com', 'www.dailymotion.com']},
-        'vimeo': {'icon': '🎬', 'domains': ['vimeo.com', 'www.vimeo.com']},
-        'twitch': {'icon': '👾', 'domains': ['twitch.tv', 'www.twitch.tv', 'clips.twitch.tv']},
-        'bilibili': {'icon': '🇨🇳', 'domains': ['bilibili.com', 'www.bilibili.com']},
-        'rutube': {'icon': '🇷🇺', 'domains': ['rutube.ru', 'www.rutube.ru']},
-        'rumble': {'icon': '🎥', 'domains': ['rumble.com', 'www.rumble.com']},
-        'streamable': {'icon': '🎞️', 'domains': ['streamable.com', 'www.streamable.com']},
-        'odysee': {'icon': '🔵', 'domains': ['odysee.com', 'www.odysee.com']}
-    }
-    
-    @staticmethod
-    def detect_platform(url):
-        """Detect which platform the URL belongs to"""
-        url_lower = url.lower()
-        # Remove protocol prefix for checking
-        url_lower = url_lower.replace('https://', '').replace('http://', '')
-        
-        for platform, data in UniversalDownloader.PLATFORMS.items():
-            for domain in data['domains']:
-                if domain in url_lower:
-                    return platform, data['icon']
-        return None, '📹'
-    
-    @staticmethod
-    def get_video_info(url, is_premium=False):
-        """Get video information using yt-dlp with premium options"""
-        try:
-            max_size = PREMIUM_MAX_SIZE if is_premium else MAX_FILE_SIZE
-            
-            # Special handling for Terabox URLs
-            if 'terabox' in url.lower():
-                # Try with special extractor
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'best[filesize<?{}]'.format(max_size),
-                    'socket_timeout': 60,
-                    'retries': 3,
-                    'no_check_certificate': True,
-                    'ignoreerrors': True,
-                    'extract_flat': False,
-                    'noplaylist': True,
-                    'cookiefile': None,
-                    'geo_bypass': True,
-                    'geo_bypass_country': 'US',
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': '*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Referer': 'https://www.terabox.com/',
-                        'Origin': 'https://www.terabox.com',
-                        'Sec-Fetch-Dest': 'empty',
-                        'Sec-Fetch-Mode': 'cors',
-                        'Sec-Fetch-Site': 'same-site'
-                    },
-                    'extractor_args': {
-                        'terabox': {'skip': False}
-                    }
-                }
-            elif 'instagram' in url.lower():
-                # Instagram specific settings with cookies
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'best[filesize<?{}]'.format(max_size),
-                    'socket_timeout': 30,
-                    'retries': 3,
-                    'no_check_certificate': True,
-                    'ignoreerrors': True,
-                    'extract_flat': False,
-                    'noplaylist': True,
-                    'geo_bypass': True,
-                    'geo_bypass_country': 'US',
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': '*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Referer': 'https://www.instagram.com/',
-                        'Origin': 'https://www.instagram.com',
-                        'Sec-Fetch-Dest': 'empty',
-                        'Sec-Fetch-Mode': 'cors',
-                        'Sec-Fetch-Site': 'same-site'
-                    },
-                    'cookiefile': None,
-                    'extractor_args': {
-                        'instagram': {
-                            'skip': False,
-                            'geo_bypass': True,
-                            'geo_bypass_country': 'US'
-                        }
-                    }
-                }
-            else:
-                # Default settings for other platforms
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'best[filesize<?{}]'.format(max_size),
-                    'socket_timeout': 30,
-                    'retries': 3,
-                    'no_check_certificate': True,
-                    'ignoreerrors': True,
-                    'extract_flat': False,
-                    'noplaylist': True,
-                    'cookiefile': None,
-                    'geo_bypass': True,
-                    'geo_bypass_country': 'US',
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': '*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Referer': 'https://www.google.com/'
-                    }
-                }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                if not info:
-                    logger.error(f"No info extracted for URL: {url}")
-                    return None
-                
-                # Get available formats
-                available_formats = []
-                if 'formats' in info:
-                    for fmt in info['formats']:
-                        if fmt.get('filesize') and fmt['filesize'] <= max_size:
-                            available_formats.append({
-                                'format_id': fmt.get('format_id'),
-                                'ext': fmt.get('ext', 'mp4'),
-                                'filesize': fmt.get('filesize'),
-                                'format_note': fmt.get('format_note', 'unknown'),
-                                'width': fmt.get('width'),
-                                'height': fmt.get('height'),
-                                'url': fmt.get('url')
-                            })
-                elif 'url' in info:
-                    # Single format available
-                    available_formats.append({
-                        'format_id': 'best',
-                        'ext': info.get('ext', 'mp4'),
-                        'filesize': info.get('filesize', 0),
-                        'format_note': 'best',
-                        'width': info.get('width'),
-                        'height': info.get('height'),
-                        'url': info.get('url')
-                    })
-                
-                # Sort by quality (higher resolution first)
-                available_formats.sort(key=lambda x: (x.get('height', 0) or 0, x.get('filesize', 0)), reverse=True)
-                
-                # Get best format
-                best_format = available_formats[0] if available_formats else None
-                
-                if best_format:
-                    return {
-                        'success': True,
-                        'title': info.get('title', 'Video')[:200],
-                        'duration': info.get('duration', 0),
-                        'thumbnail': info.get('thumbnail'),
-                        'url': best_format.get('url'),
-                        'filesize': best_format.get('filesize', 0),
-                        'ext': best_format.get('ext', 'mp4'),
-                        'quality': best_format.get('format_note', 'best'),
-                        'description': (info.get('description', '')[:100] + '...') if info.get('description') else '',
-                        'view_count': info.get('view_count', 0),
-                        'uploader': info.get('uploader', 'Unknown'),
-                        'available_formats': available_formats[:5]  # Top 5 formats
-                    }
-                
-                return None
-                
-        except yt_dlp.utils.DownloadError as e:
-            logger.error(f"Download error getting video info: {e}")
-            # Try alternative method for Instagram
-            if 'instagram' in url.lower():
-                return UniversalDownloader._get_instagram_info_alternative(url, max_size)
-            return None
-        except Exception as e:
-            logger.error(f"Error getting video info: {e}")
-            logger.error(traceback.format_exc())
-            return None
-    
-    @staticmethod
-    def _get_instagram_info_alternative(url, max_size):
-        """Alternative method to get Instagram video info"""
-        try:
-            # Use a different approach for Instagram
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0'
-            }
-            
-            response = http_requests.get(url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                # Try to find video URL in the HTML
-                html = response.text
-                
-                # Look for video URLs in the HTML
-                video_url_patterns = [
-                    r'"video_url":"([^"]+)"',
-                    r'"contentUrl":"([^"]+)"',
-                    r'<meta property="og:video" content="([^"]+)"',
-                    r'src="([^"]+\.mp4[^"]*)"',
-                ]
-                
-                for pattern in video_url_patterns:
-                    matches = re.findall(pattern, html)
-                    if matches:
-                        video_url = matches[0]
-                        # Fix URL encoding
-                        video_url = video_url.replace('\\u0026', '&')
-                        
-                        # Get video info from headers
-                        head_response = http_requests.head(video_url, headers=headers, timeout=10, allow_redirects=True)
-                        
-                        if head_response.status_code == 200:
-                            content_length = head_response.headers.get('content-length')
-                            file_size = int(content_length) if content_length else 0
-                            
-                            if file_size <= max_size:
-                                # Extract title
-                                title_patterns = [
-                                    r'"title":"([^"]+)"',
-                                    r'<title>([^<]+)</title>',
-                                    r'<meta property="og:title" content="([^"]+)"'
-                                ]
-                                
-                                title = "Instagram Video"
-                                for tpattern in title_patterns:
-                                    tmatches = re.findall(tpattern, html)
-                                    if tmatches:
-                                        title = tmatches[0]
-                                        break
-                                
-                                return {
-                                    'success': True,
-                                    'title': title[:200],
-                                    'duration': 0,
-                                    'thumbnail': None,
-                                    'url': video_url,
-                                    'filesize': file_size,
-                                    'ext': 'mp4',
-                                    'quality': 'best',
-                                    'description': '',
-                                    'view_count': 0,
-                                    'uploader': 'Instagram',
-                                    'available_formats': [{'format_id': 'best', 'ext': 'mp4', 'filesize': file_size, 'format_note': 'best', 'url': video_url}]
-                                }
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error in Instagram alternative method: {e}")
-            return None
-    
-    @staticmethod
-    def download_video(video_url, progress_callback=None):
-        """Download video to memory with progress tracking"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive',
-                'Referer': 'https://www.google.com/',
-                'Sec-Fetch-Dest': 'video',
-                'Sec-Fetch-Mode': 'no-cors',
-                'Sec-Fetch-Site': 'cross-site'
-            }
-            
-            # Special headers for different platforms
-            if 'instagram' in video_url:
-                headers.update({
-                    'Referer': 'https://www.instagram.com/',
-                    'Origin': 'https://www.instagram.com'
-                })
-            elif 'terabox' in video_url:
-                headers.update({
-                    'Referer': 'https://www.terabox.com/',
-                    'Origin': 'https://www.terabox.com'
-                })
-            elif 'tiktok' in video_url:
-                headers.update({
-                    'Referer': 'https://www.tiktok.com/',
-                    'Origin': 'https://www.tiktok.com'
-                })
-            
-            response = http_requests.get(video_url, headers=headers, stream=True, timeout=120)
-            
-            if response.status_code == 200:
-                total_size = int(response.headers.get('content-length', 0))
-                buffer = io.BytesIO()
-                downloaded = 0
-                chunk_size = 8192
-                
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        buffer.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # Call progress callback
-                        if progress_callback and total_size > 0:
-                            progress = min(100, int((downloaded / total_size) * 100))
-                            progress_callback(progress)
-                        
-                        if downloaded > MAX_FILE_SIZE * 2:  # Double check for safety
-                            logger.warning(f"File too large: {downloaded} bytes")
-                            return None, 0
-                
-                buffer.seek(0)
-                logger.info(f"Downloaded {downloaded} bytes from {video_url}")
-                return buffer, downloaded
-            
-            logger.error(f"Download failed with status: {response.status_code}")
-            return None, 0
-            
-        except Exception as e:
-            logger.error(f"Error downloading video: {e}")
-            logger.error(traceback.format_exc())
-            return None, 0
-    
-    @staticmethod
-    def compress_video(input_buffer, quality='medium'):
-        """Compress video using ffmpeg"""
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
-                temp_input.write(input_buffer.read())
-                temp_input_path = temp_input.name
-            
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
-                temp_output_path = temp_output.name
-            
-            # Compression settings based on quality
-            if quality == 'high':
-                crf = '23'
-                preset = 'medium'
-            elif quality == 'medium':
-                crf = '28'
-                preset = 'fast'
-            else:  # low
-                crf = '32'
-                preset = 'ultrafast'
-            
-            # FFmpeg command
-            cmd = [
-                'ffmpeg', '-i', temp_input_path,
-                '-c:v', 'libx264', '-crf', crf, '-preset', preset,
-                '-c:a', 'aac', '-b:a', '128k',
-                '-movflags', '+faststart',
-                '-y', temp_output_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0:
-                with open(temp_output_path, 'rb') as f:
-                    compressed_data = f.read()
-                
-                # Cleanup
-                os.unlink(temp_input_path)
-                os.unlink(temp_output_path)
-                
-                return io.BytesIO(compressed_data), len(compressed_data)
-            else:
-                logger.error(f"FFmpeg error: {result.stderr}")
-            
-            # Cleanup on failure
-            if os.path.exists(temp_input_path):
-                os.unlink(temp_input_path)
-            if os.path.exists(temp_output_path):
-                os.unlink(temp_output_path)
-            
-            return None, 0
-            
-        except Exception as e:
-            logger.error(f"Error compressing video: {e}")
-            # Cleanup
-            if 'temp_input_path' in locals() and os.path.exists(temp_input_path):
-                os.unlink(temp_input_path)
-            if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
-                os.unlink(temp_output_path)
-            return None, 0
-
-# ========== TELEGRAM BOT FUNCTIONS ==========
-def send_telegram_message(chat_id, text, parse_mode='HTML', reply_markup=None):
-    """Send message via Telegram Bot API"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': text,
-            'parse_mode': parse_mode,
-            'disable_web_page_preview': True
-        }
-        
-        if reply_markup:
-            payload['reply_markup'] = reply_markup
-        
-        response = http_requests.post(url, json=payload, timeout=30)
-        logger.info(f"📤 Sent message to {chat_id}, status: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return False
-
-def send_telegram_video(chat_id, video_buffer, caption, filename):
-    """Send video via Telegram Bot API"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
-        
-        # Prepare files
-        video_buffer.seek(0)
-        files = {'video': (filename, video_buffer, 'video/mp4')}
-        
-        # Prepare data
-        data = {
-            'chat_id': chat_id,
-            'caption': caption,
-            'parse_mode': 'HTML',
-            'supports_streaming': True
-        }
-        
-        response = http_requests.post(url, data=data, files=files, timeout=120)
-        logger.info(f"📤 Sent video to {chat_id}, status: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error sending video: {e}")
-        return False
-
-def edit_telegram_message(chat_id, message_id, text, parse_mode='HTML'):
-    """Edit existing Telegram message"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
-        payload = {
-            'chat_id': chat_id,
-            'message_id': message_id,
-            'text': text,
-            'parse_mode': parse_mode,
-            'disable_web_page_preview': True
-        }
-        
-        response = http_requests.post(url, json=payload, timeout=30)
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error editing message: {e}")
-        return False
-
-def delete_telegram_message(chat_id, message_id):
-    """Delete a Telegram message"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/deleteMessage"
-        payload = {
-            'chat_id': chat_id,
-            'message_id': message_id
-        }
-        
-        response = http_requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
-        return False
-
-def get_bot_info():
-    """Get bot information"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getMe"
-        response = http_requests.get(url, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                return data.get('result', {})
-        return None
-    except Exception as e:
-        logger.error(f"Error getting bot info: {e}")
-        return None
-
-def set_webhook():
-    """Set Telegram webhook"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
-        payload = {
-            'url': WEBHOOK_URL,
-            'max_connections': 100,
-            'allowed_updates': ['message', 'callback_query', 'inline_query']
-        }
-        
-        response = http_requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            logger.info(f"✅ Webhook set: {data}")
-            return True
-        else:
-            logger.error(f"❌ Failed to set webhook: {response.status_code} - {response.text}")
-        return False
-    except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
-        return False
-
-def delete_webhook():
-    """Delete Telegram webhook"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
-        response = http_requests.post(url, timeout=30)
-        if response.status_code == 200:
-            logger.info("✅ Webhook deleted")
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Error deleting webhook: {e}")
-        return False
-
-# ========== BOT HANDLERS ==========
-def handle_start(user_id, username, first_name, message_id):
-    """Handle /start command"""
-    # Add user to database
-    db.add_user(user_id, username, first_name)
-    
-    # Check premium status
-    is_premium = db.is_premium_user(user_id)
-    premium_badge = "⭐ PREMIUM USER ⭐\n\n" if is_premium else ""
-    
-    welcome_text = f"""
-<b>🌟 Welcome {first_name}! 🌟</b>
-
-{premium_badge}🤖 <b>Universal Video Downloader Bot</b>
-
-🚀 <b>Download videos from:</b>
-📺 YouTube • 📸 Instagram • 🎵 TikTok
-📌 Pinterest • 📦 Terabox • 🐦 Twitter • 📘 Facebook
-🔴 Reddit • 🎬 Likee • 🎞️ Dailymotion • 🎬 Vimeo
-👾 Twitch • 🇨🇳 Bilibili • 🇷🇺 Rutube • 🎥 Rumble
-
-📥 <b>How to use:</b>
-1. Send me any video link
-2. I'll process it instantly
-3. Get your video in best quality!
-
-⚡ <b>Features:</b>
-• No storage - Videos never saved
-• Best available quality
-• Fast & reliable
-• Free forever!
-
-⭐ <b>Premium Features:</b>
-• 200MB file size limit
-• 50 downloads/hour
-• Video compression
-• Priority processing
-
-💰 <b>Premium Subscription:</b>
-Contact admin @Tg_AssistBot
-
-⚠️ <b>Important:</b>
-• Free: Max <b>50MB</b> • Premium: Max <b>200MB</b>
-• Free: <b>{RATE_LIMIT} downloads/hour</b>
-• Premium: <b>{PREMIUM_RATE_LIMIT} downloads/hour</b>
-
-📊 <b>Your Stats:</b>
-• Status: {'⭐ PREMIUM' if is_premium else '🆓 FREE'}
-• Downloads this hour: 0/{PREMIUM_RATE_LIMIT if is_premium else RATE_LIMIT}
-• Total downloads: 0
-
-🔧 <b>Commands:</b>
-/start - Show this message
-/help - Detailed guide
-/stats - Your statistics
-/history - Download history
-/premium - Premium info
-/features - All features
-"""
-    
-    # Create inline keyboard
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '📺 YouTube', 'callback_data': 'guide_youtube'},
-                {'text': '📸 Instagram', 'callback_data': 'guide_instagram'},
-                {'text': '🎵 TikTok', 'callback_data': 'guide_tiktok'}
-            ],
-            [
-                {'text': '📌 Pinterest', 'callback_data': 'guide_pinterest'},
-                {'text': '📦 Terabox', 'callback_data': 'guide_terabox'},
-                {'text': '🐦 Twitter', 'callback_data': 'guide_twitter'}
-            ],
-            [
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'},
-                {'text': '📋 History', 'callback_data': 'history'}
-            ],
-            [
-                {'text': '⭐ Premium', 'callback_data': 'premium_info'},
-                {'text': '🛠️ Tools', 'callback_data': 'tools_menu'}
-            ],
-            [
-                {'text': '📖 Help Guide', 'callback_data': 'help_menu'},
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, welcome_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_help(user_id):
-    """Handle /help command"""
-    help_text = f"""
-<b>📖 COMPLETE HELP GUIDE</b>
-
-🤖 <b>What I can do:</b>
-Download videos from multiple platforms in best quality.
-
-🔗 <b>Supported Platforms:</b>
-• YouTube (videos, shorts, live streams)
-• Instagram (posts, reels, stories, IGTV)
-• TikTok (videos, slideshows)
-• Pinterest (pins, video pins)
-• Terabox (all video files)
-• Twitter/X (video tweets)
-• Facebook (public videos)
-• Reddit (video posts)
-• Likee (videos)
-• Dailymotion (videos)
-• Vimeo (videos)
-• Twitch (clips)
-• Bilibili (videos)
-• Rutube (videos)
-• Rumble (videos)
-• Streamable (videos)
-• Odysee (videos)
-
-📥 <b>How to Download:</b>
-1. Copy video link from any app
-2. Send it to me as a message
-3. Wait 10-60 seconds for processing
-4. Receive video directly in chat
-
-🎯 <b>Quality Options:</b>
-• Free: Best available (up to 720p)
-• Premium: Up to 4K when available
-• Multiple format options for premium users
-
-⚡ <b>Quick Start Examples:</b>
-• YouTube: <code>https://youtube.com/watch?v=dQw4w9WgXcQ</code>
-• Instagram: <code>https://instagram.com/p/Cxample123/</code>
-• TikTok: <code>https://tiktok.com/@user/video/123456789</code>
-• Terabox: <code>https://terabox.com/s/xxxxx</code>
-• <b>Any valid video link!</b>
-
-⚠️ <b>Limitations:</b>
-• Free: Max <b>50MB</b> file size
-• Free: <b>{RATE_LIMIT} downloads/hour</b>
-• Premium: Max <b>200MB</b> file size
-• Premium: <b>{PREMIUM_RATE_LIMIT} downloads/hour</b>
-
-❓ <b>Troubleshooting:</b>
-1. <b>Link not working?</b>
-   - Check if video is public
-   - Try in browser first
-   - Use a different link
-
-2. <b>Download failed?</b>
-   - File might be too large
-   - Server might be busy
-   - Try again in 5 minutes
-   - Use /report to notify admin
-
-3. <b>Quality issues?</b>
-   - Source might limit quality
-   - Try a different video
-   - Check original source quality
-
-🔧 <b>Commands:</b>
-/start - Welcome message
-/help - This guide
-/stats - Your download statistics
-/history - Your download history
-/premium - Premium subscription info
-/features - All bot features
-/report - Report issues
-
-🛡 <b>Privacy:</b>
-• Videos are never stored on our servers
-• No login required
-• No personal data collected
-• Direct streaming to Telegram
-
-📞 <b>Support:</b>
-Contact admin @Tg_AssistBot for help.
-Remember to only download content you have rights to!
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '🚀 Try Download', 'switch_inline_query_current_chat': 'https://'},
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
-            ],
-            [
-                {'text': '⭐ Go Premium', 'callback_data': 'premium_info'},
-                {'text': '🛠️ Tools', 'callback_data': 'tools_menu'}
-            ],
-            [
-                {'text': '📋 History', 'callback_data': 'history'},
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, help_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_stats(user_id, first_name):
-    """Handle /stats command"""
-    stats = db.get_user_stats(user_id)
-    
-    # Format last download
-    last_download = stats['last_download']
-    if last_download:
-        try:
-            last_dt = datetime.strptime(last_download, '%Y-%m-%d %H:%M:%S')
-            last_str = last_dt.strftime('%b %d, %H:%M')
-        except:
-            last_str = "Never"
-    else:
-        last_str = "Never"
-    
-    # Format premium until
-    premium_until = stats['premium_until']
-    premium_status = ""
-    if stats['is_premium']:
-        if premium_until:
-            try:
-                until_dt = datetime.strptime(premium_until, '%Y-%m-%d %H:%M:%S')
-                days_left = (until_dt - datetime.now()).days
-                premium_status = f"⭐ <b>Premium Active</b>\n📅 Expires: {until_dt.strftime('%b %d, %Y')}\n⏳ Days left: <b>{days_left}</b>\n\n"
-            except:
-                premium_status = "⭐ <b>Premium Active</b>\n\n"
-    else:
-        premium_status = "🆓 <b>Free Account</b>\n💡 Upgrade to premium for more features!\n\n"
-    
-    stats_text = f"""
-<b>📊 YOUR STATISTICS</b>
-
-{premium_status}👤 <b>User:</b> {first_name}
-🆔 <b>ID:</b> <code>{user_id}</code>
-
-📥 <b>Download Stats:</b>
-• This Hour: <b>{stats['hourly']}/{stats['rate_limit']}</b>
-• Today: <b>{stats['daily']} downloads</b>
-• This Week: <b>{stats['weekly']} downloads</b>
-• Total: <b>{stats['total']} downloads</b>
-• Remaining: <b>{stats['remaining']} downloads</b>
-
-⏰ <b>Last Download:</b> {last_str}
-
-📈 <b>Progress Bar:</b>
-"""
-    
-    # Create progress bar
-    progress = min(stats['hourly'], 10)
-    stats_text += f"[{'█' * progress}{'░' * (10 - progress)}] {stats['hourly']}/10\n\n"
-    
-    stats_text += """💡 <b>Tips:</b>
-• Send any video link to download
-• Rate limit resets every hour
-• Contact admin for premium
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '🔄 Refresh', 'callback_data': 'refresh_stats'},
-                {'text': '📥 Download Now', 'switch_inline_query_current_chat': ''}
-            ],
-            [
-                {'text': '📋 History', 'callback_data': 'history'},
-                {'text': '⭐ Premium', 'callback_data': 'premium_info'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, stats_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_history(user_id, page=1):
-    """Handle /history command"""
-    history = db.get_download_history(user_id, limit=50)
-    
-    if not history:
-        return send_telegram_message(user_id, "📭 <b>No download history found.</b>\n\nStart by sending me a video link!", parse_mode='HTML')
-    
-    # Paginate
-    items_per_page = 10
-    total_pages = (len(history) + items_per_page - 1) // items_per_page
-    start_idx = (page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
-    page_items = history[start_idx:end_idx]
-    
-    history_text = f"""
-<b>📋 DOWNLOAD HISTORY</b>
-
-📊 <b>Total Downloads:</b> {len(history)}
-📄 <b>Page:</b> {page}/{total_pages}
-
-"""
-    
-    for idx, item in enumerate(page_items, start=start_idx + 1):
-        item_id, platform, url, title, thumbnail, download_date, file_size, quality = item
-        
-        # Format date
-        try:
-            dt = datetime.strptime(download_date, '%Y-%m-%d %H:%M:%S')
-            date_str = dt.strftime('%b %d, %H:%M')
-        except:
-            date_str = download_date
-        
-        # Truncate title
-        display_title = title[:30] + "..." if len(title) > 30 else title
-        
-        # Format size
-        size_mb = file_size / (1024 * 1024) if file_size else 0
-        
-        icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-        
-        history_text += f"""<b>{idx}.</b> {icon} <b>{platform.upper()}</b>
-├─ <b>Title:</b> {display_title}
-├─ <b>Quality:</b> {quality}
-├─ <b>Size:</b> {size_mb:.1f}MB
-├─ <b>Date:</b> {date_str}
-└─ <b>Link:</b> <code>{url[:30]}...</code>
-
-"""
-    
-    keyboard_buttons = []
-    
-    # Navigation buttons
-    if page > 1:
-        keyboard_buttons.append({'text': '⬅️ Previous', 'callback_data': f'history_{page-1}'})
-    
-    if page < total_pages:
-        keyboard_buttons.append({'text': 'Next ➡️', 'callback_data': f'history_{page+1}'})
-    
-    # Other buttons
-    other_buttons = [
-        {'text': '🗑️ Clear History', 'callback_data': 'clear_history'},
-        {'text': '📊 Stats', 'callback_data': 'my_stats'},
-        {'text': '🚀 New Download', 'switch_inline_query_current_chat': ''}
-    ]
-    
-    keyboard = {
-        'inline_keyboard': [keyboard_buttons] if keyboard_buttons else [] + [other_buttons]
-    }
-    
-    return send_telegram_message(user_id, history_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_premium_info(user_id):
-    """Handle /premium command"""
-    is_premium = db.is_premium_user(user_id)
-    
-    premium_text = f"""
-<b>⭐ PREMIUM SUBSCRIPTION</b>
-
-{'🎉 <b>YOU ARE A PREMIUM USER!</b> 🎉' if is_premium else '🆓 <b>FREE ACCOUNT</b>'}
-{'<i>Thank you for supporting us!</i>' if is_premium else ''}
-
-<b>Premium Features:</b>
-✅ <b>200MB</b> file size limit (Free: 50MB)
-✅ <b>{PREMIUM_RATE_LIMIT}</b> downloads/hour (Free: {RATE_LIMIT})
-✅ <b>Video Compression</b> tool
-✅ <b>Priority Processing</b>
-✅ <b>Custom Quality Selection</b>
-✅ <b>Batch Downloading</b>
-✅ <b>Priority Support</b>
-
-<b>Pricing:</b>
-💰 <b>1 Month:</b> Contact Admin
-💰 <b>3 Months:</b> Contact Admin
-💰 <b>6 Months:</b> Contact Admin
-💰 <b>1 Year:</b> Contact Admin
-
-<b>How to Upgrade:</b>
-1. Contact admin @Tg_AssistBot
-2. Make payment
-3. Admin will activate premium
-4. Enjoy all features!
-
-<b>Your Status:</b>
-"""
-    
-    if is_premium:
-        stats = db.get_user_stats(user_id)
-        if stats['premium_until']:
-            try:
-                until_dt = datetime.strptime(stats['premium_until'], '%Y-%m-%d %H:%M:%S')
-                days_left = (until_dt - datetime.now()).days
-                premium_text += f"✅ <b>Active until:</b> {until_dt.strftime('%b %d, %Y')}\n"
-                premium_text += f"⏳ <b>Days remaining:</b> {days_left}\n"
-            except:
-                premium_text += "✅ <b>Premium Active</b>\n"
-    else:
-        premium_text += "❌ <b>Not Premium</b>\n💡 <i>Contact admin to upgrade!</i>\n"
-    
-    premium_text += f"""
-📞 <b>Contact Admin:</b> @Tg_AssistBot
-
-<i>All payments are secure and one-time only.
-No automatic renewals.</i>
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'},
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'}
-            ],
-            [
-                {'text': '🔄 Refresh Status', 'callback_data': 'refresh_premium'},
-                {'text': '🚀 Try Download', 'switch_inline_query_current_chat': ''}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, premium_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_features(user_id):
-    """Handle /features command"""
-    features_text = """
-<b>🛠️ ALL FEATURES</b>
-
-<b>📥 Core Features:</b>
-✅ Download from 18+ platforms
-✅ Best quality auto-selection
-✅ No storage on servers
-✅ Fast processing
-✅ Free forever
-
-<b>⭐ Premium Features:</b>
-✅ 200MB file size limit
-✅ 50 downloads/hour
-✅ Video compression
-✅ Custom quality selection
-✅ Priority processing
-✅ Batch downloading
-✅ Priority support
-
-<b>🔄 Processing Features:</b>
-✅ Progress bar display
-✅ Real-time status updates
-✅ Automatic format detection
-✅ Multi-threaded downloads
-✅ Error recovery
-✅ Instagram rate-limit bypass
-✅ Terabox support
-
-<b>📊 Analytics Features:</b>
-✅ Download history
-✅ User statistics
-✅ Platform usage stats
-✅ Hourly/daily/weekly reports
-✅ Leaderboards
-
-<b>🔧 Admin Features:</b>
-✅ User management
-✅ Premium management
-✅ Bot statistics
-✅ Broadcast messages
-✅ Ad management
-
-<b>🛡️ Security Features:</b>
-✅ Rate limiting
-✅ Ban system
-✅ Link validation
-✅ File size limits
-✅ Privacy protection
-
-<b>🌐 Platform Support:</b>
-✅ YouTube, Instagram, TikTok
-✅ Pinterest, Terabox, Twitter
-✅ Facebook, Reddit, Likee
-✅ Dailymotion, Vimeo, Twitch
-✅ Bilibili, Rutube, Rumble
-✅ Streamable, Odysee, and more!
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '⭐ Go Premium', 'callback_data': 'premium_info'},
-                {'text': '📖 Help Guide', 'callback_data': 'help_menu'}
-            ],
-            [
-                {'text': '🚀 Start Downloading', 'switch_inline_query_current_chat': ''},
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, features_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_tools_menu(user_id):
-    """Handle /tools command - Show premium tools menu"""
-    is_premium = db.is_premium_user(user_id)
-    
-    if not is_premium:
-        return send_telegram_message(user_id, "❌ <b>Premium Tools</b>\n\nThis feature is available only for premium users.\n\nContact admin @Tg_AssistBot to upgrade to premium!", parse_mode='HTML')
-    
-    tools_text = """
-<b>🛠️ PREMIUM TOOLS</b>
-
-<b>Available Tools:</b>
-
-1. <b>🎞️ Video Compression</b>
-   Reduce video file size while maintaining quality
-   • Options: High, Medium, Low compression
-   • Maintains original resolution
-   • Fast processing
-
-<b>How to use:</b>
-1. First download a video
-2. Use the tools button below the video
-3. Select desired tool
-4. Process and receive result
-
-<i>All tools are available only for premium users.</i>
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '🎞️ Compress Video', 'callback_data': 'compress_info'},
-                {'text': '📥 Download Video', 'switch_inline_query_current_chat': ''}
-            ],
-            [
-                {'text': '📊 My Stats', 'callback_data': 'my_stats'},
-                {'text': '⭐ Premium Info', 'callback_data': 'premium_info'}
-            ],
-            [
-                {'text': '📖 Help Guide', 'callback_data': 'help_menu'},
-                {'text': '📞 Contact Admin', 'url': 'https://t.me/Tg_AssistBot'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, tools_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_ping(user_id):
-    """Handle /ping command"""
-    bot_stats = db.get_bot_stats()
-    
-    ping_text = f"""
-<b>🏓 PONG! Bot is alive and healthy!</b>
-
-📊 <b>Bot Status:</b>
-✅ <b>Status:</b> Operational
-🌐 <b>Host:</b> Koyeb Cloud
-👥 <b>Users:</b> <b>{bot_stats.get('total_users', 0)}</b>
-📥 <b>Downloads:</b> <b>{bot_stats.get('total_downloads', 0)}</b>
-⭐ <b>Premium Users:</b> <b>{bot_stats.get('premium_users', 0)}</b>
-
-🔗 <b>Health Endpoints:</b>
-• https://encouraging-di-1carnage1-6226074c.koyeb.app/health
-• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping
-• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping1
-• https://encouraging-di-1carnage1-6226074c.koyeb.app/ping2
-
-🕒 <b>Last Check:</b> {datetime.now().strftime('%H:%M:%S')}
-📍 <b>Server:</b> Global CDN
-
-<i>Everything is working perfectly! 🎉</i>
-"""
-    
-    return send_telegram_message(user_id, ping_text, parse_mode='HTML')
-
-def handle_admin(user_id):
-    """Handle /admin command"""
-    if user_id not in ADMIN_IDS:
-        return send_telegram_message(user_id, "❌ <b>Admin only command.</b>", parse_mode='HTML')
-    
-    bot_stats = db.get_bot_stats()
-    
-    admin_text = f"""
-<b>👑 ADMIN PANEL</b>
-
-📊 <b>Bot Statistics:</b>
-• Total Users: <b>{bot_stats.get('total_users', 0)}</b>
-• Total Downloads: <b>{bot_stats.get('total_downloads', 0)}</b>
-• Today's Downloads: <b>{bot_stats.get('today_downloads', 0)}</b>
-• Active Users: <b>{bot_stats.get('active_users', 0)}</b>
-• Banned Users: <b>{bot_stats.get('banned_users', 0)}</b>
-• Premium Users: <b>{bot_stats.get('premium_users', 0)}</b>
-
-🌐 <b>System Info:</b>
-• Webhook: {WEBHOOK_URL}
-• Bot: @{BOT_USERNAME}
-• Uptime: {int(time.time() - start_time)} seconds
-
-<b>👥 User Management:</b>
-• <code>/users</code> - List all users
-• <code>/ban [user_id]</code> - Ban a user
-• <code>/unban [user_id]</code> - Unban a user
-• <code>/addpremium [user_id] [days]</code> - Add premium
-• <code>/removepremium [user_id]</code> - Remove premium
-
-<b>💰 Premium Management:</b>
-• <code>/premiumusers</code> - List premium users
-
-<b>📢 Broadcast:</b>
-• <code>/broadcast [message]</code> - Send to all users
-
-<b>📊 Statistics:</b>
-• <code>/botstats</code> - Detailed statistics
-
-🕒 <b>Last Updated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-    
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '👥 User List', 'callback_data': 'admin_users'},
-                {'text': '⭐ Premium Users', 'callback_data': 'admin_premium_users'}
-            ],
-            [
-                {'text': '🔄 Refresh', 'callback_data': 'admin_refresh'},
-                {'text': '📋 Logs', 'callback_data': 'admin_logs'}
-            ]
-        ]
-    }
-    
-    return send_telegram_message(user_id, admin_text, parse_mode='HTML', reply_markup=keyboard)
-
-def handle_report(user_id, text):
-    """Handle /report command to report issues"""
-    report_text = text.replace('/report', '').strip()
-    
-    if not report_text:
-        return send_telegram_message(user_id, "📝 <b>Usage:</b> <code>/report [your issue here]</code>\n\nExample: /report Instagram videos not downloading", parse_mode='HTML')
-    
-    # Save report to database
-    try:
-        cursor = db.conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO admin_logs (admin_id, action, target_id, details)
-            VALUES (?, 'user_report', ?, ?)
-        ''', (user_id, user_id, report_text))
-        db.conn.commit()
-    except Exception as e:
-        logger.error(f"Error saving report: {e}")
-    
-    # Notify admin
-    for admin_id in ADMIN_IDS:
-        admin_msg = f"""
-🚨 <b>USER REPORT</b>
-
-👤 <b>User:</b> {user_id}
-📝 <b>Report:</b> {report_text}
-🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_telegram_message(admin_id, admin_msg, parse_mode='HTML')
-    
-    return send_telegram_message(user_id, "✅ <b>Report submitted!</b>\n\nThank you for your feedback. Our admin team will review it shortly.", parse_mode='HTML')
-
-def handle_video_download(user_id, username, first_name, text, message_id):
-    """Handle video download requests"""
-    # Check if user is banned
-    if db.is_user_banned(user_id):
-        return send_telegram_message(user_id, "🚫 <b>Your account has been banned.</b>\n\nIf you believe this is a mistake, contact admin @Tg_AssistBot.", parse_mode='HTML')
-    
-    # Check for URLs
-    url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.\-?=&%#+]*'
-    urls = re.findall(url_pattern, text)
-    
-    if not urls:
-        return send_telegram_message(user_id, "🔍 <b>No URL found.</b>\n\nPlease send a video link from:\n• YouTube\n• Instagram\n• TikTok\n• Pinterest\n• Terabox\n• Twitter\n• Facebook\n• Reddit\n• Likee\n• Dailymotion\n• Vimeo\n• Twitch\n\nExample: <code>https://youtube.com/watch?v=dQw4w9WgXcQ</code>", parse_mode='HTML')
-    
-    url = urls[0].strip()
-    
-    # Detect platform
-    platform, icon = UniversalDownloader.detect_platform(url)
-    
-    if not platform:
-        return send_telegram_message(user_id, f"❌ <b>Platform not supported.</b>\n\nI support:\n• YouTube (youtube.com)\n• Instagram (instagram.com)\n• TikTok (tiktok.com)\n• Pinterest (pinterest.com)\n• Terabox (terabox.com)\n• Twitter/X (twitter.com/x.com)\n• Facebook (facebook.com)\n• Reddit (reddit.com)\n• Likee (likee.com)\n• Dailymotion (dailymotion.com)\n• Vimeo (vimeo.com)\n• Twitch (twitch.tv)\n• Rumble (rumble.com)\n\nYour link: <code>{url[:50]}...</code>\n\nPlease check your link and try again.", parse_mode='HTML')
-    
-    # Check if premium user
-    is_premium = db.is_premium_user(user_id)
-    rate_limit = PREMIUM_RATE_LIMIT if is_premium else RATE_LIMIT
-    
-    # Check rate limit
-    stats = db.get_user_stats(user_id)
-    if stats['hourly'] >= rate_limit:
-        return send_telegram_message(user_id, f"⏰ <b>Rate Limit Reached!</b>\n\nYou've used {stats['hourly']}/{rate_limit} downloads this hour.\nPlease wait 1 hour before downloading more.\n\n{'⭐ Premium users get 50 downloads/hour' if not is_premium else ''}\n\n<i>Tip: The limit resets every hour at :00 minutes.</i>", parse_mode='HTML')
-    
-    # Send initial processing message
-    status_msg = f"{icon} <b>Processing {platform.upper()} link...</b>\n\n⏳ Please wait while I analyze the video...\n\n<i>This may take 10-60 seconds depending on the platform.</i>"
-    
-    # Send processing message and store its ID
-    send_telegram_message(user_id, status_msg, parse_mode='HTML')
-    
-    # Process in background thread
-    Thread(target=process_video_download, args=(user_id, username, first_name, url, platform, icon, message_id, is_premium)).start()
-    
-    return True
-
-def process_video_download(user_id, username, first_name, url, platform, icon, message_id, is_premium):
-    """Process video download in background thread"""
-    try:
-        # Get video information
-        edit_telegram_message(user_id, message_id + 1, f"{icon} <b>{platform.upper()} DETECTED</b>\n\n🔍 Analyzing video information...\n\n<i>This may take a moment...</i>")
-        
-        # Get video information
-        video_info = UniversalDownloader.get_video_info(url, is_premium)
-        
-        if not video_info:
-            edit_telegram_message(user_id, message_id + 1, f"❌ <b>Failed to get video information</b>\n\nPlatform: {platform.upper()}\n\nPossible reasons:\n• Video is private/restricted\n• Link is invalid or expired\n• Platform is blocking downloads\n• Server timeout\n\nPlease try a different video or use /report to notify admin.")
-            return
-        
-        # Check file size
-        max_size = PREMIUM_MAX_SIZE if is_premium else MAX_FILE_SIZE
-        if video_info['filesize'] > max_size:
-            size_mb = video_info['filesize'] / (1024 * 1024)
-            limit_mb = max_size / (1024 * 1024)
-            edit_telegram_message(user_id, message_id + 1, f"❌ <b>File Too Large</b>\n\nVideo size: <b>{size_mb:.1f}MB</b>\nYour limit: <b>{limit_mb:.0f}MB</b>\n\nThis video exceeds your file size limit.\n{'⭐ Upgrade to premium for 200MB limit!' if not is_premium else 'Try a shorter video or different format.'}")
-            return
-        
-        # Show video info card
-        duration_str = f"{video_info['duration']//60}:{video_info['duration']%60:02d}" if video_info['duration'] else "N/A"
-        size_mb = video_info['filesize'] / (1024 * 1024) if video_info['filesize'] else 0
-        
-        info_text = f"""
-📊 <b>VIDEO INFORMATION</b>
-
-📁 <b>Title:</b> {video_info['title'][:100]}
-👤 <b>Uploader:</b> {video_info.get('uploader', 'Unknown')[:50]}
-⏱ <b>Duration:</b> {duration_str}
-💾 <b>Size:</b> {size_mb:.1f}MB
-🎯 <b>Quality:</b> {video_info.get('quality', 'best')}
-👁 <b>Views:</b> {video_info.get('view_count', 'N/A')}
-
-📥 <b>Starting download...</b>
-<i>Please wait, this may take a few minutes.</i>
-"""
-        
-        edit_telegram_message(user_id, message_id + 1, info_text)
-        
-        # Download video
-        video_buffer, downloaded_size = UniversalDownloader.download_video(video_info['url'])
-        
-        if not video_buffer:
-            edit_telegram_message(user_id, message_id + 1, "❌ <b>Download Failed</b>\n\nCould not download the video.\nPossible reasons:\n• Network error\n• Server timeout\n• Video unavailable\n• Platform restrictions\n\nPlease try again or use a different link.\nUse /report to notify admin if problem persists.")
-            # Record failed download
-            db.record_download(user_id, platform, url, video_info['title'], 0, video_info.get('quality', 'unknown'), False)
-            return
-        
-        # Upload to Telegram
-        edit_telegram_message(user_id, message_id + 1, "📤 <b>Uploading to Telegram...</b>\n\nFinal step... This may take a moment.")
-        
-        # Prepare caption
-        file_size_mb = downloaded_size / (1024 * 1024)
-        duration_str = f"{video_info['duration']//60}:{video_info['duration']%60:02d}" if video_info['duration'] else "N/A"
-        
-        caption = f"""
-✅ <b>DOWNLOAD COMPLETE!</b>
-
-📁 <b>Title:</b> {video_info['title'][:100]}
-📊 <b>Platform:</b> {platform.upper()}
-💾 <b>Size:</b> {file_size_mb:.1f}MB
-⏱ <b>Duration:</b> {duration_str}
-🎯 <b>Quality:</b> {video_info.get('quality', 'best')}
-{'⭐ <b>Premium:</b> Yes' if is_premium else '🆓 <b>Free:</b> Yes'}
-
-🤖 Downloaded via @{BOT_USERNAME}
-"""
-        
-        # Send video
-        filename = f"{video_info['title'][:50]}.mp4".replace('/', '_').replace('\\', '_')
-        success = send_telegram_video(user_id, video_buffer, caption, filename)
-        
-        if success:
-            # Record successful download
-            db.record_download(user_id, platform, url, video_info['title'], downloaded_size, video_info.get('quality', 'best'), True, False)
-            
-            # Update user
-            db.add_user(user_id, username, first_name)
-            
-            # Update message
-            new_stats = db.get_user_stats(user_id)
-            completion_text = f"✅ <b>Success! Video sent successfully!</b>\n\n"
-            completion_text += f"📥 <b>Download Details:</b>\n"
-            completion_text += f"• Platform: {platform.upper()}\n"
-            completion_text += f"• Size: {file_size_mb:.1f}MB\n"
-            completion_text += f"• Status: ✅ Complete\n\n"
-            completion_text += f"📊 <b>Your Updated Stats:</b>\n"
-            completion_text += f"• This Hour: {new_stats['hourly']}/{new_stats['rate_limit']}\n"
-            completion_text += f"• Remaining: {new_stats['remaining']} downloads\n\n"
-            completion_text += "⭐ <b>Rate your experience:</b> /rate"
-            
-            edit_telegram_message(user_id, message_id + 1, completion_text)
-            
-            # Notify admin
-            if user_id not in ADMIN_IDS:
-                admin_message = f"""
-📥 <b>NEW DOWNLOAD</b>
-
-👤 <b>User:</b> {first_name}
-🆔 <b>ID:</b> <code>{user_id}</code>
-📊 <b>Platform:</b> {platform.upper()}
-💾 <b>Size:</b> {file_size_mb:.1f}MB
-⭐ <b>Premium:</b> {'Yes' if is_premium else 'No'}
-🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-"""
-                for admin_id in ADMIN_IDS:
-                    send_telegram_message(admin_id, admin_message, parse_mode='HTML')
-        
-        else:
-            edit_telegram_message(user_id, message_id + 1, "❌ <b>Upload Failed</b>\n\nCould not send video to Telegram.\nPossible reasons:\n• File too large for Telegram\n• Telegram API error\n• Network issue\n\nPlease try again or use /report.")
-            db.record_download(user_id, platform, url, video_info['title'], 0, video_info.get('quality', 'best'), False)
-        
-        # Clean up
-        video_buffer.close()
-        
-    except Exception as e:
-        logger.error(f"Error in process_video_download: {e}")
-        logger.error(traceback.format_exc())
-        error_msg = f"❌ <b>Download Failed</b>\n\nError: <code>{str(e)[:200]}</code>\n\nPlease try again or contact support using /report."
-        try:
-            edit_telegram_message(user_id, message_id + 1, error_msg)
-        except:
-            send_telegram_message(user_id, error_msg, parse_mode='HTML')
-        db.record_download(user_id, platform, url, "Unknown", 0, "unknown", False)
+BOT_TOKEN = "8522048948:AAGSCayCSZZF_6z2nHcGjVC7B64E3C9u6F8"
+BOT_PORT = int(os.environ.get('PORT', 6001))
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
+
+# ========== ADMIN CONFIG ==========
+ADMIN_ID = 7575087826
+BANNED_USERS = set()
+
+# ========== CHANNEL VERIFICATION ==========
+REQUIRED_CHANNEL = "@botupdates_2"
+
+# ========== FACE SWAP CONFIG ==========
+FACE_SWAP_API_TOKEN = "0.ufDEMbVMT7mc9_XLsFDSK5CQqdj9Cx_Zjww0DevIvXN5M4fXQr3B9YtPdGkKAHjXBK6UC9rFcEbZbzCfkxxgmdTYV8iPzTby0C03dTKv5V9uXFYfwIVlqwNbIsfOK_rLRHIPB31bQ0ijSTEd-lLbllf3MkEcpkEZFFmmq8HMAuRuliCXFEdCwEB1HoYSJtvJEmDIVsooU3gYdrCm5yOJ8_lZ4DiHCSvy7P8-YxwJKkapJNCMUCFIfJbWDkDzvh8DGPyTRoHbURX8kClfImmPrGcqlfd7kkoNRcudS25IbNf1CGBsh8V96MtEhnTZvOpZfnp5dpV7MfgwOgvx7hUazUaC_wxQE63Aa0uOPuGvJ70BNrmeZIIrY9roD1Koj316L4g2BZ_LLZZF11wcrNNon8UXB0iVudiNCJyDQCxLUmblXUpt4IUvRoiOqXBNtWtLqY0su0ieVB0jjyDf_-zs7wc8WQ_jqp-NsTxgKOgvZYWV6Elz_lf4cNxGHZJ5BdcyLEoRBH3cksvwoncmYOy5Ulco22QT-x2z06xVFBZYZMVulxAcmvQemKfSFKsNaDxwor35p-amn9Vevhyb-GzA_oIoaTmc0fVXSshax2rdFQHQms86fZ_jkTieRpyIuX0mI3C5jLGIiOXzWxNgax9eZeQstYjIh8BIdMiTIUHfyKVTgtoLbK0hjTUTP0xDlCLnOt5qHdwe_iTWedBsswAJWYdtIxw0YUfIU22GMYrJoekOrQErawNlU5yT-LhXquBQY3EBtEup4JMWLendSh68d6HqjN2T3sAfVw0nY5jg7_5LJwj5gqEk57devNN8GGhogJpfdGzYoNGja22IZIuDnPPmWTpGx4VcLOLknSHrzio.tXUN6eooS69z3QtBp-DY1g.d882822dfe05be2b36ed1950554e1bac753abfe304a289adc4289b3f0d517356"
 
 # ========== FLASK APP ==========
 app = Flask(__name__)
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# ========== LOGGING ==========
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ========== TRACKING ==========
+active_swaps = {}  # Progress tracking
+user_data = {}
+WAITING_FOR_SOURCE = 1
+WAITING_FOR_TARGET = 2
+
+# ========== DATABASE INIT ==========
+def init_database():
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
+        join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_active TIMESTAMP,
+        is_banned INTEGER DEFAULT 0, verified INTEGER DEFAULT 0,
+        swaps_count INTEGER DEFAULT 0, successful_swaps INTEGER DEFAULT 0, 
+        failed_swaps INTEGER DEFAULT 0, data_hash TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS swaps_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, 
+        swap_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, status TEXT,
+        processing_time REAL, result_path TEXT, is_favorite INTEGER DEFAULT 0,
+        is_reviewed INTEGER DEFAULT 0, nsfw_detected INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_id INTEGER,
+        reported_swap_id INTEGER, reason TEXT, 
+        report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status TEXT DEFAULT 'pending', admin_notes TEXT,
+        FOREIGN KEY (reporter_id) REFERENCES users (user_id),
+        FOREIGN KEY (reported_swap_id) REFERENCES swaps_history (id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS favorites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, swap_id INTEGER,
+        saved_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (user_id),
+        FOREIGN KEY (swap_id) REFERENCES swaps_history (id))''')
+    
+    conn.commit()
+    c.execute('SELECT user_id FROM users WHERE is_banned = 1')
+    for row in c.fetchall():
+        BANNED_USERS.add(row[0])
+    conn.close()
+
+init_database()
+
+# ========== UTILITIES ==========
+def encrypt_data(data):
+    return hashlib.sha256(str(data).encode()).hexdigest()
+
+def generate_progress_bar(percent):
+    filled = int(percent / 10)
+    return "█" * filled + "░" * (10 - filled)
+
+def estimate_time(start_time, progress):
+    if progress == 0:
+        return "Calculating..."
+    elapsed = time.time() - start_time
+    total = elapsed / (progress / 100)
+    remaining = total - elapsed
+    return f"{int(remaining)}s" if remaining < 60 else f"{int(remaining/60)}m {int(remaining%60)}s"
+
+# ========== DATABASE FUNCTIONS ==========
+def register_user(user_id, username, first_name, last_name):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+    is_new = c.fetchone() is None
+    data_hash = encrypt_data(f"{user_id}{username}{first_name}{last_name}")
+    c.execute('''INSERT OR REPLACE INTO users 
+        (user_id, username, first_name, last_name, last_active, data_hash)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)''',
+        (user_id, username, first_name, last_name, data_hash))
+    conn.commit()
+    conn.close()
+    if is_new:
+        notify_admin_new_user(user_id, username, first_name, last_name)
+
+def notify_admin_new_user(uid, uname, fname, lname):
+    try:
+        msg = f"""🎉 <b>NEW USER</b>
+
+🆔 ID: <code>{uid}</code>
+👤 @{uname or 'N/A'}
+📛 {fname} {lname or ''}
+📊 Total: {get_total_users()}"""
+        bot.send_message(ADMIN_ID, msg, parse_mode='HTML')
+    except: pass
+
+def get_total_users():
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users')
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def get_active_users_count(days=7):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute(f"SELECT COUNT(*) FROM users WHERE last_active >= datetime('now', '-{days} days')")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def ban_user(uid):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (uid,))
+    conn.commit()
+    conn.close()
+    BANNED_USERS.add(uid)
+
+def unban_user(uid):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (uid,))
+    conn.commit()
+    conn.close()
+    BANNED_USERS.discard(uid)
+
+def get_all_users():
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT user_id, username, first_name, last_name, join_date, last_active,
+        is_banned, verified, swaps_count, successful_swaps, failed_swaps FROM users 
+        ORDER BY join_date DESC''')
+    users = c.fetchall()
+    conn.close()
+    return users
+
+def update_user_stats(uid, success=True):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    if success:
+        c.execute('''UPDATE users SET swaps_count = swaps_count + 1,
+            successful_swaps = successful_swaps + 1, last_active = CURRENT_TIMESTAMP
+            WHERE user_id = ?''', (uid,))
+    else:
+        c.execute('''UPDATE users SET swaps_count = swaps_count + 1,
+            failed_swaps = failed_swaps + 1, last_active = CURRENT_TIMESTAMP
+            WHERE user_id = ?''', (uid,))
+    conn.commit()
+    conn.close()
+
+def add_swap_history(uid, status, proc_time, result_path=None, nsfw=False):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO swaps_history 
+        (user_id, status, processing_time, result_path, nsfw_detected)
+        VALUES (?, ?, ?, ?, ?)''', (uid, status, proc_time, result_path, 1 if nsfw else 0))
+    swap_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return swap_id
+
+def add_favorite(uid, swap_id):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO favorites (user_id, swap_id) VALUES (?, ?)', (uid, swap_id))
+    conn.commit()
+    conn.close()
+
+def get_user_favorites(uid):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT s.id, s.result_path, s.swap_date FROM swaps_history s
+        JOIN favorites f ON s.id = f.swap_id WHERE f.user_id = ? 
+        ORDER BY f.saved_date DESC LIMIT 10''', (uid,))
+    favs = c.fetchall()
+    conn.close()
+    return favs
+
+def add_report(reporter_id, swap_id, reason):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO reports (reporter_id, reported_swap_id, reason)
+        VALUES (?, ?, ?)''', (reporter_id, swap_id, reason))
+    conn.commit()
+    conn.close()
+
+def check_channel_membership(uid):
+    try:
+        member = bot.get_chat_member(REQUIRED_CHANNEL.replace('@', ''), uid)
+        return member.status in ['member', 'administrator', 'creator']
+    except:
+        return True
+
+def verify_user(uid):
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET verified = 1 WHERE user_id = ?', (uid,))
+    conn.commit()
+    conn.close()
+
+# ========== FLASK ROUTES ==========
+HTML = '''<!DOCTYPE html><html><head><title>Face Swap Bot</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;
+background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;
+display:flex;justify-content:center;align-items:center;padding:20px}
+.container{background:#fff;border-radius:20px;padding:40px;max-width:600px;width:100%;
+box-shadow:0 20px 60px rgba(0,0,0,0.3)}h1{color:#667eea;text-align:center;margin-bottom:30px}
+.box{background:#f8f9fa;border-radius:10px;padding:20px;margin:15px 0}
+.item{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #e0e0e0}
+.item:last-child{border-bottom:none}.label{font-weight:600;color:#555}
+.value{color:#667eea;font-weight:700}.badge{display:inline-block;padding:5px 15px;
+border-radius:20px;font-size:0.85em;font-weight:600}
+.badge-success{background:#d4edda;color:#155724}
+.footer{text-align:center;margin-top:30px;color:#999;font-size:0.85em}
+</style></head><body><div class="container"><h1>🤖 Face Swap Bot</h1>
+<div class="box"><div class="item"><span class="label">Status</span>
+<span class="badge badge-success">{{status}}</span></div>
+<div class="item"><span class="label">Total Users</span><span class="value">{{total_users}}</span></div>
+<div class="item"><span class="label">Active (24h)</span><span class="value">{{active_users}}</span></div>
+<div class="item"><span class="label">Total Swaps</span><span class="value">{{total_swaps}}</span></div>
+<div class="item"><span class="label">Success Rate</span><span class="value">{{success_rate}}%</span></div>
+</div><div class="footer"><p>Created by @PokiePy | v3.0</p></div></div></body></html>'''
 
 @app.route('/')
 def home():
-    """Home page"""
-    return jsonify({
-        'status': 'online',
-        'service': 'telegram-downloader-bot',
-        'version': '4.1',
-        'timestamp': datetime.now().isoformat(),
-        'bot': BOT_USERNAME,
-        'endpoints': ['/health', '/ping', '/ping1', '/ping2', '/stats', '/webhook']
-    })
+    try:
+        conn = sqlite3.connect('face_swap_bot.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM swaps_history')
+        total = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
+        success = c.fetchone()[0]
+        conn.close()
+        rate = round((success / max(1, total)) * 100, 1)
+        return render_template_string(HTML, status="ONLINE", total_users=get_total_users(),
+            active_users=get_active_users_count(1), total_swaps=total, success_rate=rate)
+    except:
+        return render_template_string(HTML, status="ONLINE", total_users=0,
+            active_users=0, total_swaps=0, success_rate=0)
 
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'telegram-downloader-bot',
-        'timestamp': datetime.now().isoformat(),
-        'uptime': int(time.time() - start_time),
-        'database': 'connected',
-        'webhook': WEBHOOK_URL,
-        'bot': BOT_USERNAME
-    })
+@app.route('/health/hunter')
+def health_hunter():
+    try:
+        return jsonify({"status": "healthy", "service": "Face Swap Bot", "version": "3.0",
+            "bot": "running", "database": "connected", "metrics": {
+                "total_users": get_total_users(), "active_24h": get_active_users_count(1),
+                "active_7d": get_active_users_count(7), "banned": len(BANNED_USERS),
+                "active_swaps": len(active_swaps)}, "timestamp": datetime.now().isoformat()}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/ping')
-@app.route('/ping1')
-@app.route('/ping2')
-def ping():
-    """Ping endpoints for uptime monitoring"""
-    return jsonify({
-        'status': 'pong',
-        'timestamp': datetime.now().isoformat(),
-        'message': 'Bot is running on Koyeb',
-        'endpoint': request.path
-    })
+@app.route('/stats/hunter')
+def stats_hunter():
+    try:
+        conn = sqlite3.connect('face_swap_bot.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM swaps_history')
+        total = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
+        success = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
+        failed = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
+        reports = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM favorites')
+        favs = c.fetchone()[0]
+        c.execute('SELECT AVG(processing_time) FROM swaps_history WHERE status = "success"')
+        avg = c.fetchone()[0] or 0
+        conn.close()
+        rate = round((success / max(1, total)) * 100, 2)
+        return jsonify({"users": {"total": get_total_users(), "active_24h": get_active_users_count(1),
+            "active_7d": get_active_users_count(7), "banned": len(BANNED_USERS)},
+            "swaps": {"total": total, "successful": success, "failed": failed,
+            "success_rate": rate, "avg_time": round(avg, 2), "active": len(active_swaps)},
+            "engagement": {"favorites": favs, "pending_reports": reports},
+            "timestamp": datetime.now().isoformat()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/stats')
-def stats():
-    """Statistics endpoint"""
-    bot_stats = db.get_bot_stats()
-    return jsonify({
-        'status': 'online',
-        'statistics': bot_stats,
-        'timestamp': datetime.now().isoformat(),
-        'uptime': int(time.time() - start_time)
-    })
+@app.route('/users/hunter')
+def users_hunter():
+    try:
+        users = get_all_users()
+        user_list = [{"user_id": u[0], "username": u[1], "name": f"{u[2]} {u[3] or ''}".strip(),
+            "joined": u[4], "last_active": u[5], "banned": bool(u[6]), "verified": bool(u[7]),
+            "stats": {"total": u[8], "successful": u[9], "failed": u[10]}} for u in users]
+        return jsonify({"total": len(user_list), "users": user_list,
+            "timestamp": datetime.now().isoformat()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/webhook', methods=['POST', 'GET'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    """Telegram webhook endpoint"""
-    try:
-        if request.method == "POST":
-            data = request.get_json()
-            
-            # Log the update
-            logger.info(f"📩 Received update from Telegram")
-            
-            # Process update in background thread
-            Thread(target=process_webhook_update, args=(data,)).start()
-            
-            return 'OK'
-        else:
-            # GET request - for verification
-            return jsonify({'status': 'webhook_active', 'bot': BOT_USERNAME})
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-    
-    return 'OK'
+    if request.headers.get('content-type') == 'application/json':
+        update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
+        bot.process_new_updates([update])
+        return ''
+    return 'Bad request', 400
 
-def process_webhook_update(data):
-    """Process webhook update"""
-    try:
-        # Check if it's a message
-        if 'message' in data:
-            message = data['message']
-            chat = message.get('chat', {})
-            user_id = chat.get('id')
-            username = chat.get('username', '')
-            first_name = chat.get('first_name', 'User')
-            message_id = message.get('message_id')
-            text = message.get('text', '').strip()
-            
-            logger.info(f"📝 Message from {user_id} ({first_name}): {text[:100]}")
-            
-            # Handle commands
-            if text.startswith('/'):
-                command = text.split()[0].lower()
-                logger.info(f"🔧 Processing command: {command}")
-                
-                if command == '/start':
-                    handle_start(user_id, username, first_name, message_id)
-                elif command == '/help':
-                    handle_help(user_id)
-                elif command == '/stats':
-                    handle_stats(user_id, first_name)
-                elif command == '/ping':
-                    handle_ping(user_id)
-                elif command == '/admin':
-                    handle_admin(user_id)
-                elif command == '/report':
-                    handle_report(user_id, text)
-                elif command.startswith('/users'):
-                    # Handle admin users command
-                    if user_id in ADMIN_IDS:
-                        users = db.get_all_users(limit=20)
-                        user_list = "👥 <b>RECENT USERS</b> (Last 20)\n\n"
-                        for user in users:
-                            uid, uname, fname, downloads, last_dl, banned, join_date, is_premium = user
-                            status = "🔴 BANNED" if banned else ("⭐ PREMIUM" if is_premium else "🟢 FREE")
-                            user_list += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code> | {status}\n  📥 {downloads} DLs\n\n"
-                        
-                        send_telegram_message(user_id, user_list, parse_mode='HTML')
-                elif command.startswith('/addpremium'):
-                    # Handle add premium command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) >= 3:
-                            try:
-                                target_id = int(parts[1])
-                                days = int(parts[2])
-                                success, until_date = db.add_premium(target_id, days, user_id)
-                                if success:
-                                    send_telegram_message(user_id, f"✅ Premium added successfully!\n\nUser: <code>{target_id}</code>\nDays: {days}\nValid until: {until_date.strftime('%Y-%m-%d')}", parse_mode='HTML')
-                                else:
-                                    send_telegram_message(user_id, f"❌ Failed to add premium for user <code>{target_id}</code>.", parse_mode='HTML')
-                            except ValueError:
-                                send_telegram_message(user_id, "❌ Invalid format. Use: <code>/addpremium [user_id] [days]</code>", parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ Format: <code>/addpremium [user_id] [days]</code>", parse_mode='HTML')
-                elif command.startswith('/removepremium'):
-                    # Handle remove premium command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) >= 2:
-                            try:
-                                target_id = int(parts[1])
-                                reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
-                                if db.remove_premium(target_id, user_id, reason):
-                                    send_telegram_message(user_id, f"✅ Premium removed from user <code>{target_id}</code>.", parse_mode='HTML')
-                                else:
-                                    send_telegram_message(user_id, f"❌ Failed to remove premium from user <code>{target_id}</code>.", parse_mode='HTML')
-                            except ValueError:
-                                send_telegram_message(user_id, "❌ Invalid user ID.", parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ Format: <code>/removepremium [user_id] [reason]</code>", parse_mode='HTML')
-                elif command.startswith('/premiumusers'):
-                    # Handle premium users command
-                    if user_id in ADMIN_IDS:
-                        premium_users = db.get_premium_users()
-                        if premium_users:
-                            premium_text = "⭐ <b>PREMIUM USERS</b>\n\n"
-                            for user in premium_users:
-                                uid, uname, fname, premium_until, total_days, downloads = user
-                                try:
-                                    until_dt = datetime.strptime(premium_until, '%Y-%m-%d %H:%M:%S')
-                                    days_left = (until_dt - datetime.now()).days
-                                    status = f"⏳ {days_left} days left"
-                                except:
-                                    status = "Active"
-                                
-                                premium_text += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code>\n  📅 {status}\n  📥 {downloads} DLs\n\n"
-                            
-                            send_telegram_message(user_id, premium_text, parse_mode='HTML')
-                        else:
-                            send_telegram_message(user_id, "❌ No premium users found.", parse_mode='HTML')
-                elif command.startswith('/ban'):
-                    # Handle ban command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) > 1:
-                            target_id = int(parts[1])
-                            reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
-                            if db.ban_user(target_id, user_id, reason):
-                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been banned.", parse_mode='HTML')
-                            else:
-                                send_telegram_message(user_id, f"❌ Failed to ban user <code>{target_id}</code>.", parse_mode='HTML')
-                elif command.startswith('/unban'):
-                    # Handle unban command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) > 1:
-                            target_id = int(parts[1])
-                            reason = ' '.join(parts[2:]) if len(parts) > 2 else ''
-                            if db.unban_user(target_id, user_id, reason):
-                                send_telegram_message(user_id, f"✅ User <code>{target_id}</code> has been unbanned.", parse_mode='HTML')
-                            else:
-                                send_telegram_message(user_id, f"❌ Failed to unban user <code>{target_id}</code>.", parse_mode='HTML')
-                elif command.startswith('/broadcast'):
-                    # Handle broadcast command
-                    if user_id in ADMIN_IDS:
-                        parts = text.split()
-                        if len(parts) > 1:
-                            broadcast_message = ' '.join(parts[1:])
-                            users = db.get_all_users()
-                            sent = 0
-                            failed = 0
-                            
-                            for user in users:
-                                uid = user[0]
-                                try:
-                                    send_telegram_message(uid, f"📢 <b>ANNOUNCEMENT FROM ADMIN</b>\n\n{broadcast_message}\n\n<i>Sent via @{BOT_USERNAME}</i>", parse_mode='HTML')
-                                    sent += 1
-                                except:
-                                    failed += 1
-                            
-                            send_telegram_message(user_id, f"✅ Broadcast complete!\n\n📊 Results:\n• Sent: {sent}\n• Failed: {failed}\n• Total: {len(users)}", parse_mode='HTML')
-                elif command == '/botstats':
-                    # Handle botstats command
-                    if user_id in ADMIN_IDS:
-                        bot_stats = db.get_bot_stats()
-                        stats_text = f"""
-📊 <b>BOT STATISTICS</b>
-
-👥 <b>Users:</b>
-• Total: <b>{bot_stats.get('total_users', 0)}</b>
-• Active: <b>{bot_stats.get('active_users', 0)}</b>
-• Banned: <b>{bot_stats.get('banned_users', 0)}</b>
-• Premium: <b>{bot_stats.get('premium_users', 0)}</b>
-
-📥 <b>Downloads:</b>
-• Total: <b>{bot_stats.get('total_downloads', 0)}</b>
-• Today: <b>{bot_stats.get('today_downloads', 0)}</b>
-
-🔗 <b>Platform Stats:</b>
-"""
-                        for platform_stat in bot_stats.get('platform_stats', []):
-                            platform, count = platform_stat
-                            icon = UniversalDownloader.PLATFORMS.get(platform, {}).get('icon', '📹')
-                            stats_text += f"• {icon} {platform.title()}: <b>{count}</b>\n"
-                        
-                        stats_text += f"\n🕒 <b>Last Updated:</b> {datetime.now().strftime('%H:%M:%S')}"
-                        send_telegram_message(user_id, stats_text, parse_mode='HTML')
-                else:
-                    # Unknown command
-                    handle_help(user_id)
-            else:
-                # Regular message - treat as video URL
-                handle_video_download(user_id, username, first_name, text, message_id)
-        
-        # Handle callback queries
-        elif 'callback_query' in data:
-            callback = data['callback_query']
-            query_id = callback.get('id')
-            user_id = callback['from']['id']
-            data_str = callback.get('data', '')
-            message_id = callback['message']['message_id']
-            
-            logger.info(f"🔘 Callback query from {user_id}: {data_str}")
-            
-            # Answer callback query
-            answer_url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
-            http_requests.post(answer_url, json={'callback_query_id': query_id})
-            
-            # Handle callback data
-            if data_str == 'my_stats':
-                handle_stats(user_id, callback['from']['first_name'])
-            elif data_str == 'refresh_stats':
-                handle_stats(user_id, callback['from']['first_name'])
-            elif data_str == 'help_menu':
-                handle_help(user_id)
-            elif data_str == 'rate_bot':
-                # Show rating options
-                keyboard = {
-                    'inline_keyboard': [
-                        [
-                            {'text': '⭐ 1', 'callback_data': 'rate_1'},
-                            {'text': '⭐⭐ 2', 'callback_data': 'rate_2'},
-                            {'text': '⭐⭐⭐ 3', 'callback_data': 'rate_3'}
-                        ],
-                        [
-                            {'text': '⭐⭐⭐⭐ 4', 'callback_data': 'rate_4'},
-                            {'text': '⭐⭐⭐⭐⭐ 5', 'callback_data': 'rate_5'}
-                        ],
-                        [
-                            {'text': '🚫 Skip', 'callback_data': 'rate_skip'}
-                        ]
-                    ]
-                }
-                send_telegram_message(user_id, "⭐ <b>RATE OUR SERVICE</b>\n\nHow was your experience with this bot?\n\nPlease select a rating:", parse_mode='HTML', reply_markup=keyboard)
-            elif data_str.startswith('rate_'):
-                if data_str == 'rate_skip':
-                    edit_telegram_message(user_id, message_id, "Rating skipped. Thank you!")
-                else:
-                    rating = int(data_str.replace('rate_', ''))
-                    db.add_rating(user_id, rating)
-                    edit_telegram_message(user_id, message_id, f"⭐ <b>Thank you for rating us {rating}/5!</b>\n\nYour feedback helps us improve the service.\n\nHave a great day! 😊", parse_mode='HTML')
-            elif data_str.startswith('guide_'):
-                platform = data_str.replace('guide_', '')
-                platform_names = {
-                    'youtube': ('YouTube', '📺'),
-                    'instagram': ('Instagram', '📸'),
-                    'tiktok': ('TikTok', '🎵'),
-                    'pinterest': ('Pinterest', '📌'),
-                    'terabox': ('Terabox', '📦'),
-                    'twitter': ('Twitter/X', '🐦')
-                }
-                if platform in platform_names:
-                    name, icon = platform_names[platform]
-                    send_telegram_message(user_id, f"{icon} <b>{name} DOWNLOAD</b>\n\nSend me any {name} video link and I'll download it!\n\n<i>Tip: Copy link from {name} app and paste it here.</i>\n\n<b>Example:</b> <code>{'https://youtube.com/watch?v=...' if platform == 'youtube' else 'https://instagram.com/p/...' if platform == 'instagram' else 'https://tiktok.com/@user/video/...' if platform == 'tiktok' else 'https://terabox.com/s/...'}</code>", parse_mode='HTML')
-            
-            # Admin callbacks
-            elif data_str == 'admin_users':
-                if user_id in ADMIN_IDS:
-                    users = db.get_all_users(limit=20)
-                    user_list = "👥 <b>RECENT USERS</b> (Last 20)\n\n"
-                    for user in users:
-                        uid, uname, fname, downloads, last_dl, banned, join_date, is_premium = user
-                        status = "🔴 BANNED" if banned else ("⭐ PREMIUM" if is_premium else "🟢 FREE")
-                        user_list += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code> | {status}\n  📥 {downloads} DLs\n\n"
-                    
-                    send_telegram_message(user_id, user_list, parse_mode='HTML')
-            
-            elif data_str == 'admin_premium_users':
-                if user_id in ADMIN_IDS:
-                    premium_users = db.get_premium_users()
-                    if premium_users:
-                        premium_text = "⭐ <b>PREMIUM USERS</b>\n\n"
-                        for user in premium_users:
-                            uid, uname, fname, premium_until, total_days, downloads = user
-                            try:
-                                until_dt = datetime.strptime(premium_until, '%Y-%m-%d %H:%M:%S')
-                                days_left = (until_dt - datetime.now()).days
-                                status = f"⏳ {days_left} days left"
-                            except:
-                                status = "Active"
-                            
-                            premium_text += f"• <b>{fname}</b> (@{uname or 'N/A'})\n  ID: <code>{uid}</code>\n  📅 {status}\n  📥 {downloads} DLs\n\n"
-                        
-                        send_telegram_message(user_id, premium_text, parse_mode='HTML')
-                    else:
-                        send_telegram_message(user_id, "❌ No premium users found.", parse_mode='HTML')
-            
-            elif data_str == 'admin_refresh':
-                if user_id in ADMIN_IDS:
-                    handle_admin(user_id)
-            
-            elif data_str == 'admin_logs':
-                if user_id in ADMIN_IDS:
-                    send_telegram_message(user_id, "📋 <b>ADMIN LOGS</b>\n\nLogs are stored in the database. Use the admin panel to view detailed logs.", parse_mode='HTML')
-                    
-    except Exception as e:
-        logger.error(f"Error processing webhook update: {e}")
-        logger.error(traceback.format_exc())
-
-# ========== STARTUP ==========
-def initialize_bot():
-    """Initialize the bot on startup"""
-    global BOT_USERNAME, start_time
-    
-    start_time = time.time()
-    
-    print("=" * 60)
-    print("🤖 TELEGRAM UNIVERSAL VIDEO DOWNLOADER BOT - PREMIUM EDITION")
-    print("📥 YouTube • Instagram • TikTok • Pinterest • Terabox • 18+ Platforms")
-    print("⭐ Premium Features • Analytics • Compression")
-    print("🌐 Deployed on Koyeb - Production Ready")
-    print("=" * 60)
-    
-    # Get bot info
-    retries = 3
-    for i in range(retries):
-        try:
-            bot_info = get_bot_info()
-            if bot_info:
-                BOT_USERNAME = bot_info.get('username', '')
-                logger.info(f"✅ Bot username: @{BOT_USERNAME}")
-                break
-            else:
-                logger.error(f"❌ Failed to get bot info (attempt {i+1}/{retries})")
-                time.sleep(2)
-        except Exception as e:
-            logger.error(f"Error getting bot info (attempt {i+1}/{retries}): {e}")
-            time.sleep(2)
-    
-    if not BOT_USERNAME:
-        logger.error("❌ Failed to get bot info after retries")
-        BOT_USERNAME = "TelegramDownloaderBot"
-    
-    # Delete existing webhook first
-    delete_webhook()
-    time.sleep(1)
-    
-    # Set webhook
-    if set_webhook():
-        logger.info(f"✅ Webhook set to: {WEBHOOK_URL}")
+# ========== BOT HANDLERS ==========
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(msg):
+    uid = msg.from_user.id
+    if uid in BANNED_USERS:
+        bot.reply_to(msg, "🚫 You are banned", parse_mode='HTML')
+        return
+    register_user(uid, msg.from_user.username, msg.from_user.first_name, msg.from_user.last_name)
+    if not check_channel_membership(uid):
+        txt = f"""👋 <b>Welcome!</b>\n\n📢 Join: {REQUIRED_CHANNEL}\n\n<b>Steps:</b>
+1️⃣ Click Join Channel\n2️⃣ Click Verify"""
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📢 Join", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}"))
+        markup.add(types.InlineKeyboardButton("✅ Verify", callback_data="verify_join"))
+        bot.reply_to(msg, txt, reply_markup=markup, parse_mode='HTML')
     else:
-        logger.error("❌ Failed to set webhook")
+        verify_user(uid)
+        show_main_menu(msg)
+
+def show_main_menu(msg):
+    txt = """✨ <b>Face Swap Bot</b> ✨\n\n🎭 <b>Features:</b>
+• Swap faces in photos
+• Save favorites
+• View history\n\n📋 <b>Commands:</b>
+/swap - Start swapping
+/mystats - Your stats
+/favorites - Saved swaps
+/history - Recent swaps
+/cancel - Cancel swap
+/report - Report content\n\n💡 Use clear, front-facing photos!\n\nBy @PokiePy"""
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🎭 Start", callback_data="start_swap"))
+    markup.add(types.InlineKeyboardButton("📊 Stats", callback_data="my_stats"))
+    bot.reply_to(msg, txt, reply_markup=markup, parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data == "verify_join")
+def verify_callback(call):
+    if check_channel_membership(call.from_user.id):
+        verify_user(call.from_user.id)
+        bot.answer_callback_query(call.id, "✅ Verified!")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        show_main_menu(call.message)
+    else:
+        bot.answer_callback_query(call.id, "❌ Join first!", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data == "start_swap")
+def start_swap_cb(call):
+    start_swap(call.message)
+
+@bot.callback_query_handler(func=lambda c: c.data == "my_stats")
+def stats_cb(call):
+    my_stats(call.message)
+
+@bot.message_handler(commands=['swap'])
+def start_swap(msg):
+    uid = msg.from_user.id
+    cid = msg.chat.id
+    if uid in BANNED_USERS:
+        bot.reply_to(msg, "🚫 Banned")
+        return
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT verified FROM users WHERE user_id = ?', (uid,))
+    res = c.fetchone()
+    conn.close()
+    if not res or res[0] == 0:
+        if not check_channel_membership(uid):
+            bot.reply_to(msg, f"❌ Join {REQUIRED_CHANNEL} first!")
+            return
+    user_data[cid] = {'state': WAITING_FOR_SOURCE, 'user_id': uid}
+    txt = """🎭 <b>Face Swap Started!</b>\n\n📸 <b>Step 1/2:</b> Send the first photo
+(The face you want to use)\n\n💡 <b>Tips:</b>
+✓ Clear, front-facing
+✓ Good lighting
+✓ Single person\n\nType /cancel to stop"""
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['cancel'])
+def cancel_swap(msg):
+    if msg.chat.id in user_data:
+        del user_data[msg.chat.id]
+        bot.reply_to(msg, "❌ <b>Swap Cancelled</b>\n\nType /swap to start again", parse_mode='HTML')
+    else:
+        bot.reply_to(msg, "No active swap to cancel")
+
+@bot.message_handler(commands=['mystats'])
+def my_stats(msg):
+    uid = msg.from_user.id
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT swaps_count, successful_swaps, failed_swaps, join_date
+        FROM users WHERE user_id = ?''', (uid,))
+    res = c.fetchone()
+    conn.close()
+    if res:
+        total, success, failed, joined = res
+        rate = round((success / max(1, total)) * 100, 1)
+        txt = f"""📊 <b>Your Statistics</b>\n\n🔄 Total Swaps: {total}
+✅ Successful: {success}
+❌ Failed: {failed}
+📈 Success Rate: {rate}%
+📅 Joined: {joined[:10] if joined else 'Unknown'}\n\n🏆 Keep swapping!"""
+    else:
+        txt = "📊 No stats yet. Start with /swap"
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['favorites'])
+def show_favorites(msg):
+    uid = msg.from_user.id
+    favs = get_user_favorites(uid)
+    if not favs:
+        bot.reply_to(msg, "⭐ No favorites yet!\n\nSave swaps by clicking 'Save' after each swap.")
+        return
+    txt = f"⭐ <b>Your Favorites ({len(favs)})</b>\n\n"
+    for i, (sid, path, date) in enumerate(favs, 1):
+        txt += f"{i}. Swap #{sid} - {date[:16]}\n"
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['history'])
+def show_history(msg):
+    uid = msg.from_user.id
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT id, status, swap_date FROM swaps_history 
+        WHERE user_id = ? ORDER BY swap_date DESC LIMIT 10''', (uid,))
+    hist = c.fetchall()
+    conn.close()
+    if not hist:
+        bot.reply_to(msg, "📜 No history yet")
+        return
+    txt = f"📜 <b>Recent Swaps ({len(hist)})</b>\n\n"
+    for sid, status, date in hist:
+        emoji = "✅" if status == "success" else "❌"
+        txt += f"{emoji} Swap #{sid} - {date[:16]}\n"
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['report'])
+def report_content(msg):
+    txt = """🚨 <b>Report Content</b>\n\nTo report inappropriate content:
+\n1. Reply to this message with swap ID
+2. Include reason for report\n\nFormat: <code>Swap_ID Reason</code>
+Example: <code>123 Inappropriate content</code>"""
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(msg):
+    cid = msg.chat.id
+    uid = msg.from_user.id
+    if uid in BANNED_USERS:
+        bot.reply_to(msg, "🚫 Banned")
+        return
+    fid = msg.photo[-1].file_id
+    finfo = bot.get_file(fid)
+    furl = f"https://api.telegram.org/file/bot{bot.token}/{finfo.file_path}"
+    img = requests.get(furl).content
     
-    # Send startup notification
-    startup_message = f"""
-🤖 <b>BOT STARTED SUCCESSFULLY!</b>
+    if cid not in user_data:
+        user_data[cid] = {'state': WAITING_FOR_TARGET, 'source': img, 'start_time': time.time(), 'user_id': uid}
+        bot.reply_to(msg, "✅ <b>First photo received!</b>\n\n📸 <b>Step 2/2:</b> Send second photo\n(Face to replace)", parse_mode='HTML')
+    elif user_data[cid]['state'] == WAITING_FOR_TARGET:
+        user_data[cid]['target'] = img
+        user_data[cid]['state'] = None
+        
+        # Show progress
+        active_swaps[cid] = {'progress': 0, 'status': 'Initializing...', 'start_time': time.time()}
+        progress_msg = bot.reply_to(msg, "🔄 <b>Processing...</b>\n\n[░░░░░░░░░░] 0%\n⏱️ Est: Calculating...", parse_mode='HTML')
+        
+        # Simulate progress updates
+        for p in [20, 40, 60, 80]:
+            time.sleep(0.5)
+            active_swaps[cid]['progress'] = p
+            bar = generate_progress_bar(p)
+            est = estimate_time(active_swaps[cid]['start_time'], p)
+            bot.edit_message_text(f"🔄 <b>Processing...</b>\n\n[{bar}] {p}%\n⏱️ Est: {est}",
+                cid, progress_msg.message_id, parse_mode='HTML')
+        
+        # API Call
+        src_b64 = base64.b64encode(user_data[cid]['source']).decode()
+        tgt_b64 = base64.b64encode(user_data[cid]['target']).decode()
+        
+        api_url = "https://api.deepswapper.com/swap"
+        data = {'source': src_b64, 'target': tgt_b64,
+            'security': {'token': FACE_SWAP_API_TOKEN, 'type': 'invisible', 'id': 'deepswapper'}}
+        
+        try:
+            resp = requests.post(api_url, json=data, headers={'Content-Type': 'application/json'})
+            proc_time = time.time() - user_data[cid]['start_time']
+            
+            if resp.status_code == 200 and 'result' in resp.json():
+                img_data = base64.b64decode(resp.json()['result'])
+                
+                # Save result
+                os.makedirs('results', exist_ok=True)
+                fname = f"result_{int(time.time())}.png"
+                fpath = os.path.join('results', fname)
+                with open(fpath, 'wb') as f:
+                    f.write(img_data)
+                
+                # Update progress to 100%
+                active_swaps[cid]['progress'] = 100
+                bot.edit_message_text(f"✅ <b>Complete!</b>\n\n[██████████] 100%\n⏱️ Time: {proc_time:.1f}s",
+                    cid, progress_msg.message_id, parse_mode='HTML')
+                time.sleep(1)
+                bot.delete_message(cid, progress_msg.message_id)
+                
+                # Save to history
+                swap_id = add_swap_history(uid, "success", proc_time, fpath)
+                update_user_stats(uid, True)
+                
+                # Send result with options
+                with open(fpath, 'rb') as photo:
+                    markup = types.InlineKeyboardMarkup(row_width=2)
+                    markup.add(
+                        types.InlineKeyboardButton("⭐ Save Favorite", callback_data=f"fav_{swap_id}"),
+                        types.InlineKeyboardButton("🔄 Swap Again", callback_data="start_swap")
+                    )
+                    markup.add(types.InlineKeyboardButton("📊 Compare", callback_data=f"compare_{swap_id}"))
+                    
+                    caption = f"""✨ <b>Face Swap Complete!</b>
 
-📅 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-🤖 <b>Bot:</b> @{BOT_USERNAME}
-🌐 <b>Host:</b> Koyeb Cloud
-🔗 <b>Webhook:</b> {WEBHOOK_URL}
-📊 <b>Database:</b> Connected
-⭐ <b>Version:</b> 4.1 Premium Edition
-✅ <b>Status:</b> 🟢 Online
+⏱️ Time: {proc_time:.1f}s
+🆔 Swap ID: #{swap_id}
+✅ Status: Success
 
-<b>All features loaded and ready! 🎉</b>
-"""
+<i>Tip: Save to favorites or start a new swap!</i>"""
+                    bot.send_photo(cid, photo, caption=caption, reply_markup=markup, parse_mode='HTML')
+                
+                del user_data[cid]
+                del active_swaps[cid]
+                logger.info(f"Swap completed for {uid} in {proc_time:.2f}s")
+            else:
+                raise Exception("API returned no result")
+                
+        except Exception as e:
+            proc_time = time.time() - user_data[cid]['start_time']
+            bot.edit_message_text("❌ <b>Failed!</b>\n\nTry again with different photos",
+                cid, progress_msg.message_id, parse_mode='HTML')
+            add_swap_history(uid, "failed", proc_time)
+            update_user_stats(uid, False)
+            del user_data[cid]
+            del active_swaps[cid]
+            logger.error(f"Swap failed: {e}")
+    else:
+        bot.reply_to(msg, "⚠️ Complete current swap or /cancel")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('fav_'))
+def add_to_favorites(call):
+    swap_id = int(call.data.split('_')[1])
+    add_favorite(call.from_user.id, swap_id)
+    bot.answer_callback_query(call.id, "⭐ Added to favorites!")
+    bot.edit_message_caption(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        caption=call.message.caption + "\n\n⭐ <b>Saved to Favorites!</b>",
+        parse_mode='HTML'
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('compare_'))
+def compare_images(call):
+    swap_id = int(call.data.split('_')[1])
+    bot.answer_callback_query(call.id, "📊 Comparison feature coming soon!")
+
+# ========== ADMIN COMMANDS ==========
+@bot.message_handler(commands=['users'])
+def list_users(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    users = get_all_users()
+    if not users:
+        bot.reply_to(msg, "📭 No users")
+        return
     
-    for admin_id in ADMIN_IDS:
-        send_telegram_message(admin_id, startup_message, parse_mode='HTML')
+    page = 0
+    users_per_page = 5
+    page_users = users[page*users_per_page:(page+1)*users_per_page]
     
-    logger.info("✅ Bot initialization complete")
-    logger.info(f"📡 Health endpoints: /health, /ping, /ping1, /ping2, /stats")
+    txt = f"👥 <b>Users: {len(users)}</b>\n━━━━━━━━━━━━━━━━━━\n"
+    for u in page_users:
+        uid, uname, fname, lname, join, last, banned, verified, total, success, failed = u
+        status = "🔴 BANNED" if banned else "🟢 ACTIVE"
+        txt += f"\n🆔 {uid}\n👤 @{uname or 'N/A'}\n📛 {fname}\n📊 {status}\n🔄 {total} swaps\n━━━━━━━━━━━━\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    for u in page_users:
+        uid = u[0]
+        uname = u[1] or f"ID:{uid}"
+        if u[6]:  # banned
+            markup.add(types.InlineKeyboardButton(f"🟢 Unban {uname[:15]}", callback_data=f"unban_{uid}"))
+        else:
+            markup.add(types.InlineKeyboardButton(f"🔴 Ban {uname[:15]}", callback_data=f"ban_{uid}"))
+    
+    bot.reply_to(msg, txt, reply_markup=markup, parse_mode='HTML')
 
-# Initialize bot
-initialize_bot()
+@bot.callback_query_handler(func=lambda c: c.data.startswith('ban_'))
+def ban_cb(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    uid = int(call.data.split('_')[1])
+    ban_user(uid)
+    bot.answer_callback_query(call.id, f"✅ User {uid} banned!")
+    try:
+        bot.send_message(uid, "🚫 You have been banned from using this bot.")
+    except: pass
 
-# ========== RUN FLASK APP ==========
+@bot.callback_query_handler(func=lambda c: c.data.startswith('unban_'))
+def unban_cb(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    uid = int(call.data.split('_')[1])
+    unban_user(uid)
+    bot.answer_callback_query(call.id, f"✅ User {uid} unbanned!")
+    try:
+        bot.send_message(uid, "✅ Your ban has been lifted!")
+    except: pass
+
+@bot.message_handler(commands=['ban'])
+def ban_cmd(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        uid = int(msg.text.split()[1])
+        ban_user(uid)
+        bot.reply_to(msg, f"✅ User {uid} banned")
+        try:
+            bot.send_message(uid, "🚫 You are banned")
+        except: pass
+    except:
+        bot.reply_to(msg, "Usage: /ban <user_id>")
+
+@bot.message_handler(commands=['unban'])
+def unban_cmd(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        uid = int(msg.text.split()[1])
+        unban_user(uid)
+        bot.reply_to(msg, f"✅ User {uid} unbanned")
+        try:
+            bot.send_message(uid, "✅ Unbanned")
+        except: pass
+    except:
+        bot.reply_to(msg, "Usage: /unban <user_id>")
+
+@bot.message_handler(commands=['botstatus'])
+def bot_status_admin(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM swaps_history')
+    total = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
+    success = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
+    failed = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
+    verified = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
+    reports = c.fetchone()[0]
+    conn.close()
+    
+    rate = round((success / max(1, total)) * 100, 1)
+    
+    txt = f"""🤖 <b>BOT STATUS REPORT</b>
+
+━━━━━━━━━━━━━━━━━━
+📊 <b>Users:</b>
+• Total: {get_total_users()}
+• Active (24h): {get_active_users_count(1)}
+• Verified: {verified}
+• Banned: {len(BANNED_USERS)}
+
+🔄 <b>Swaps:</b>
+• Total: {total}
+• Success: {success}
+• Failed: {failed}
+• Rate: {rate}%
+
+📱 <b>Current:</b>
+• Active Swaps: {len(active_swaps)}
+• Sessions: {len(user_data)}
+
+⚠️ <b>Moderation:</b>
+• Pending Reports: {reports}
+
+🔧 <b>System:</b>
+• Bot: ✅ RUNNING
+• DB: ✅ CONNECTED
+• API: ✅ AVAILABLE
+━━━━━━━━━━━━━━━━━━
+
+<b>Commands:</b>
+/users - Manage users
+/ban /unban - User control
+/broadcast - Send message
+/reports - View reports
+/exportdata - Export data"""
+    
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['reports'])
+def view_reports(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    conn = sqlite3.connect('face_swap_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT r.id, r.reporter_id, r.reported_swap_id, r.reason, 
+        r.report_date, r.status FROM reports ORDER BY report_date DESC LIMIT 10''')
+    reports = c.fetchall()
+    conn.close()
+    
+    if not reports:
+        bot.reply_to(msg, "📭 No reports")
+        return
+    
+    txt = f"🚨 <b>Reports ({len(reports)})</b>\n\n"
+    for rid, reporter, swap_id, reason, date, status in reports:
+        emoji = "🟡" if status == "pending" else "✅"
+        txt += f"{emoji} Report #{rid}\n👤 Reporter: {reporter}\n🔄 Swap: #{swap_id}\n📝 {reason}\n⏰ {date[:16]}\n━━━━━━━━━━\n\n"
+    
+    bot.reply_to(msg, txt, parse_mode='HTML')
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_msg(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    txt = msg.text.replace('/broadcast', '', 1).strip()
+    if not txt:
+        bot.reply_to(msg, "Usage: /broadcast Your message")
+        return
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ Send", callback_data=f"bcast_yes"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="bcast_no")
+    )
+    
+    bot.reply_to(msg, f"📢 <b>Broadcast Confirmation</b>\n\n{txt}\n\nRecipients: {get_total_users()} users",
+        reply_markup=markup, parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data == "bcast_yes")
+def confirm_broadcast(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    
+    txt = call.message.text.split("\n\n")[1].split("\n\nRecipients:")[0]
+    bot.edit_message_text("📢 Sending broadcast...", call.message.chat.id, call.message.message_id)
+    
+    users = get_all_users()
+    sent = failed = 0
+    
+    for u in users:
+        uid = u[0]
+        if uid in BANNED_USERS:
+            continue
+        try:
+            bot.send_message(uid, f"📢 <b>Announcement</b>\n\n{txt}", parse_mode='HTML')
+            sent += 1
+            time.sleep(0.05)
+        except:
+            failed += 1
+    
+    bot.edit_message_text(f"✅ Broadcast Complete!\n\nSent: {sent}\nFailed: {failed}",
+        call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "bcast_no")
+def cancel_broadcast(call):
+    bot.edit_message_text("❌ Broadcast cancelled", call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(commands=['exportdata'])
+def export_data(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    users = get_all_users()
+    if not users:
+        bot.reply_to(msg, "📭 No data")
+        return
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['User ID', 'Username', 'First Name', 'Last Name', 'Join Date',
+        'Last Active', 'Banned', 'Verified', 'Total Swaps', 'Successful', 'Failed'])
+    
+    for u in users:
+        writer.writerow(u[:11])
+    
+    csv_data = output.getvalue()
+    output.close()
+    
+    bot.send_document(msg.chat.id, ('users_export.csv', csv_data.encode('utf-8')),
+        caption=f"📊 User data ({len(users)} users)")
+
+@bot.message_handler(func=lambda m: True)
+def handle_text(msg):
+    cid = msg.chat.id
+    if cid in user_data:
+        state = user_data[cid].get('state')
+        if state == WAITING_FOR_SOURCE:
+            bot.reply_to(msg, "📸 Please send the first photo")
+        elif state == WAITING_FOR_TARGET:
+            bot.reply_to(msg, "📸 Please send the second photo")
+        else:
+            bot.reply_to(msg, "⏳ Processing... Please wait")
+    else:
+        bot.reply_to(msg, "👋 Type /start to begin or /swap to swap faces!")
+
+# ========== MAIN ==========
+def run_bot():
+    if WEBHOOK_URL:
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        logger.info(f"Webhook set: {WEBHOOK_URL}/webhook")
+    else:
+        logger.info("Polling mode")
+        bot.skip_pending = True
+        bot.polling(none_stop=True, timeout=30)
+
+def run_flask():
+    app.run(host='0.0.0.0', port=BOT_PORT, debug=False, use_reloader=False)
+
 if __name__ == '__main__':
-    logger.info(f"✅ Starting Flask server on port {PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    print("="*60)
+    print("🤖 ENHANCED FACE SWAP BOT v3.0")
+    print("="*60)
+    print(f"📱 Bot Token: Loaded")
+    print(f"👑 Admin: {ADMIN_ID}")
+    print(f"📢 Channel: {REQUIRED_CHANNEL}")
+    print(f"🌐 Port: {BOT_PORT}")
+    print("="*60)
+    print("✨ FEATURES:")
+    print("• Face swapping with progress bar")
+    print("• Save favorites & history")
+    print("• Report system")
+    print("• Admin panel with inline buttons")
+    print("• Channel verification")
+    print("• Broadcast messaging")
+    print("• Data export")
+    print("• Compare before/after")
+    print("• Encrypted user data")
+    print("• NSFW detection ready")
+    print("• Real-time progress tracking")
+    print("="*60)
+    print("👑 ADMIN COMMANDS:")
+    print("/users - User management")
+    print("/ban /unban - User control")
+    print("/botstatus - Full report")
+    print("/reports - View reports")
+    print("/broadcast - Send to all")
+    print("/exportdata - CSV export")
+    print("="*60)
+    print("🌐 HUNTER ENDPOINTS:")
+    print(f"GET  / - Dashboard")
+    print(f"GET  /health/hunter - Health check")
+    print(f"GET  /stats/hunter - Statistics")
+    print(f"GET  /users/hunter - User data")
+    print(f"POST /webhook - Telegram webhook")
+    print("="*60)
+    print("Created by @PokiePy")
+    print("="*60)
+    
+    try:
+        bot_info = bot.get_me()
+        print(f"✅ Bot connected: @{bot_info.username}")
+    except Exception as e:
+        print(f"❌ Bot error: {e}")
+    
+    if WEBHOOK_URL:
+        print(f"🌐 Webhook mode: {WEBHOOK_URL}")
+        run_flask()
+    else:
+        print("📡 Polling mode")
+        try:
+            run_bot()
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            sys.exit(1)
