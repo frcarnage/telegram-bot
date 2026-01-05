@@ -1702,7 +1702,7 @@ def unban_command(message):
         
         # Try to notify user
         try:
-            bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML")
+            bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML')
         except:
             pass
         
