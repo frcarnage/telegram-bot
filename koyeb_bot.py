@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced Face Swap Bot v3.1
-A comprehensive Telegram bot for face swapping with admin controls, statistics, and web interface
+Enhanced Face Swap Bot v3.2 - Fixed State Management
 """
 
 import os
@@ -43,8 +42,10 @@ FACE_SWAP_API_TOKEN = "0.ufDEMbVMT7mc9_XLsFDSK5CQqdj9Cx_Zjww0DevIvXN5M4fXQr3B9Yt
 FACE_SWAP_API_URL = "https://api.deepswapper.com/swap"
 
 # ========== APPLICATION STATES ==========
-WAITING_FOR_SOURCE = 1
-WAITING_FOR_TARGET = 2
+STATE_IDLE = 0
+STATE_WAITING_SOURCE = 1
+STATE_WAITING_TARGET = 2
+STATE_PROCESSING = 3
 
 # ========== INITIALIZE ==========
 app = Flask(__name__)
@@ -63,8 +64,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== GLOBAL TRACKING ==========
+# Store user sessions: {chat_id: {state, user_id, data}}
+user_sessions: Dict[int, Dict] = {}
 active_swaps: Dict[int, Dict] = {}  # chat_id -> swap info
-user_data: Dict[int, Dict] = {}     # chat_id -> user session data
 
 # ========== DATABASE FUNCTIONS ==========
 def init_database() -> None:
@@ -125,11 +127,6 @@ def init_database() -> None:
         FOREIGN KEY (swap_id) REFERENCES swaps_history (id)
     )''')
     
-    # Create indexes for better performance
-    c.execute('CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_swaps_user_date ON swaps_history(user_id, swap_date)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)')
-    
     # Load banned users
     c.execute('SELECT user_id FROM users WHERE is_banned = 1')
     for row in c.fetchall():
@@ -146,10 +143,6 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 # ========== UTILITY FUNCTIONS ==========
-def encrypt_data(data: Any) -> str:
-    """Generate SHA256 hash of data"""
-    return hashlib.sha256(str(data).encode()).hexdigest()
-
 def generate_progress_bar(percent: int) -> str:
     """Generate a progress bar string"""
     filled = int(percent / 10)
@@ -171,14 +164,21 @@ def estimate_time(start_time: float, progress: int) -> str:
     else:
         return f"{int(remaining/3600)}h {int((remaining%3600)/60)}m"
 
-def format_time(seconds: float) -> str:
-    """Format seconds to human readable time"""
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
-    else:
-        return f"{seconds/3600:.1f}h"
+def download_telegram_photo(file_id: str) -> Optional[bytes]:
+    """Download photo from Telegram"""
+    try:
+        file_info = bot.get_file(file_id)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        response = requests.get(file_url, timeout=30)
+        
+        if response.status_code == 200:
+            return response.content
+        else:
+            logger.error(f"Failed to download photo: {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error downloading photo: {e}")
+        return None
 
 # ========== USER MANAGEMENT FUNCTIONS ==========
 def register_user(user_id: int, username: str, first_name: str, last_name: str) -> bool:
@@ -191,7 +191,7 @@ def register_user(user_id: int, username: str, first_name: str, last_name: str) 
     is_new = c.fetchone() is None
     
     # Calculate data hash
-    data_hash = encrypt_data(f"{user_id}{username}{first_name}{last_name}")
+    data_hash = hashlib.sha256(f"{user_id}{username}{first_name}{last_name}".encode()).hexdigest()
     
     # Insert or update user
     c.execute('''INSERT OR REPLACE INTO users 
@@ -202,42 +202,13 @@ def register_user(user_id: int, username: str, first_name: str, last_name: str) 
     conn.commit()
     conn.close()
     
-    # Notify admin for new users
-    if is_new:
-        notify_admin_new_user(user_id, username, first_name, last_name)
-        logger.info(f"New user registered: {user_id} (@{username})")
-    
     return is_new
-
-def notify_admin_new_user(user_id: int, username: str, first_name: str, last_name: str) -> None:
-    """Notify admin about new user registration"""
-    try:
-        msg = f"""🎉 <b>NEW USER REGISTERED</b>
-
-🆔 ID: <code>{user_id}</code>
-👤 Username: @{username or 'N/A'}
-📛 Name: {first_name} {last_name or ''}
-📊 Total Users: {get_total_users()}
-🕒 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        
-        bot.send_message(ADMIN_ID, msg, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Failed to notify admin: {e}")
 
 def get_total_users() -> int:
     """Get total number of registered users"""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM users')
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def get_active_users_count(days: int = 7) -> int:
-    """Get number of active users in last N days"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(f"SELECT COUNT(*) FROM users WHERE last_active >= datetime('now', '-{days} days')")
     count = c.fetchone()[0]
     conn.close()
     return count
@@ -262,18 +233,24 @@ def unban_user(user_id: int) -> None:
     BANNED_USERS.discard(user_id)
     logger.info(f"User unbanned: {user_id}")
 
-def get_all_users(limit: int = 100, offset: int = 0) -> List[Tuple]:
-    """Get all users with pagination"""
+def check_channel_membership(user_id: int) -> bool:
+    """Check if user is member of required channel"""
+    try:
+        channel_username = REQUIRED_CHANNEL.replace('@', '')
+        member = bot.get_chat_member(f"@{channel_username}", user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        logger.error(f"Failed to check channel membership: {e}")
+        return False
+
+def verify_user(user_id: int) -> None:
+    """Verify user (mark as channel member)"""
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''SELECT user_id, username, first_name, last_name, join_date, last_active,
-        is_banned, verified, swaps_count, successful_swaps, failed_swaps 
-        FROM users 
-        ORDER BY join_date DESC 
-        LIMIT ? OFFSET ?''', (limit, offset))
-    users = c.fetchall()
+    c.execute('UPDATE users SET verified = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
     conn.close()
-    return users
+    logger.info(f"User verified: {user_id}")
 
 def update_user_stats(user_id: int, success: bool = True) -> None:
     """Update user statistics after a swap"""
@@ -326,10 +303,6 @@ def add_favorite(user_id: int, swap_id: int) -> bool:
             return False
         
         c.execute('INSERT INTO favorites (user_id, swap_id) VALUES (?, ?)', (user_id, swap_id))
-        
-        # Update swap's favorite status
-        c.execute('UPDATE swaps_history SET is_favorite = 1 WHERE id = ?', (swap_id,))
-        
         conn.commit()
         conn.close()
         
@@ -355,552 +328,75 @@ def get_user_favorites(user_id: int, limit: int = 10) -> List[Tuple]:
     conn.close()
     return favorites
 
-def add_report(reporter_id: int, swap_id: int, reason: str) -> int:
-    """Add a report"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''INSERT INTO reports (reporter_id, reported_swap_id, reason)
-        VALUES (?, ?, ?)''', (reporter_id, swap_id, reason))
-    
-    report_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"Report added: ID={report_id}, Reporter={reporter_id}, Swap={swap_id}")
-    return report_id
-
-def check_channel_membership(user_id: int) -> bool:
-    """Check if user is member of required channel"""
+# ========== FACE SWAP API FUNCTIONS ==========
+def call_face_swap_api(source_image: bytes, target_image: bytes) -> Optional[bytes]:
+    """Call the face swap API and return result image"""
     try:
-        channel_username = REQUIRED_CHANNEL.replace('@', '')
-        member = bot.get_chat_member(f"@{channel_username}", user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Failed to check channel membership: {e}")
-        return False
-
-def verify_user(user_id: int) -> None:
-    """Verify user (mark as channel member)"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('UPDATE users SET verified = 1 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    logger.info(f"User verified: {user_id}")
-
-# ========== FLASK ROUTES ==========
-HTML_TEMPLATE = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Swap Bot - Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
+        logger.info("Calling face swap API...")
         
-        body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
+        # Convert images to base64
+        source_base64 = base64.b64encode(source_image).decode('utf-8')
+        target_base64 = base64.b64encode(target_image).decode('utf-8')
         
-        .container {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 20px;
-            padding: 40px;
-            max-width: 800px;
-            width: 100%;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            backdrop-filter: blur(10px);
-        }
-        
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        
-        .header h1 {
-            color: #667eea;
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 15px;
-        }
-        
-        .header p {
-            color: #666;
-            font-size: 1.1rem;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stat-card {
-            background: #f8f9fa;
-            border-radius: 15px;
-            padding: 20px;
-            text-align: center;
-            transition: transform 0.3s ease;
-            border: 2px solid transparent;
-        }
-        
-        .stat-card:hover {
-            transform: translateY(-5px);
-            border-color: #667eea;
-        }
-        
-        .stat-card .value {
-            font-size: 2rem;
-            font-weight: bold;
-            color: #667eea;
-            margin: 10px 0;
-        }
-        
-        .stat-card .label {
-            color: #666;
-            font-size: 0.9rem;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        
-        .badge {
-            display: inline-block;
-            padding: 8px 20px;
-            border-radius: 20px;
-            font-weight: 600;
-            margin-bottom: 20px;
-        }
-        
-        .badge-success {
-            background: #d4edda;
-            color: #155724;
-        }
-        
-        .badge-error {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        
-        .info-box {
-            background: #f8f9fa;
-            border-radius: 15px;
-            padding: 25px;
-            margin-bottom: 20px;
-        }
-        
-        .info-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 12px 0;
-            border-bottom: 1px solid #e0e0e0;
-        }
-        
-        .info-item:last-child {
-            border-bottom: none;
-        }
-        
-        .info-label {
-            font-weight: 600;
-            color: #555;
-        }
-        
-        .info-value {
-            color: #667eea;
-            font-weight: 700;
-        }
-        
-        .endpoints {
-            margin-top: 30px;
-        }
-        
-        .endpoints h3 {
-            color: #667eea;
-            margin-bottom: 15px;
-        }
-        
-        .endpoint-list {
-            background: #f8f9fa;
-            border-radius: 10px;
-            padding: 15px;
-        }
-        
-        .endpoint {
-            font-family: monospace;
-            padding: 8px;
-            margin: 5px 0;
-            background: white;
-            border-radius: 5px;
-            border-left: 4px solid #667eea;
-        }
-        
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            color: #999;
-            font-size: 0.9rem;
-            padding-top: 20px;
-            border-top: 1px solid #eee;
-        }
-        
-        @media (max-width: 768px) {
-            .container {
-                padding: 20px;
-            }
-            
-            .header h1 {
-                font-size: 2rem;
-                flex-direction: column;
-                gap: 10px;
-            }
-            
-            .stats-grid {
-                grid-template-columns: 1fr;
+        # Prepare API request
+        payload = {
+            "source": source_base64,
+            "target": target_base64,
+            "security": {
+                "token": FACE_SWAP_API_TOKEN,
+                "type": "invisible",
+                "id": "deepswapper"
             }
         }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>
-                <span>🤖</span>
-                Face Swap Bot
-                <span>🎭</span>
-            </h1>
-            <p>Advanced Face Swapping Telegram Bot with Real-time Dashboard</p>
-            <div class="badge badge-success">{{ status }}</div>
-        </div>
         
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="label">Total Users</div>
-                <div class="value">{{ total_users }}</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="label">Active (24h)</div>
-                <div class="value">{{ active_24h }}</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="label">Total Swaps</div>
-                <div class="value">{{ total_swaps }}</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="label">Success Rate</div>
-                <div class="value">{{ success_rate }}%</div>
-            </div>
-        </div>
-        
-        <div class="info-box">
-            <div class="info-item">
-                <span class="info-label">Bot Version</span>
-                <span class="info-value">3.1</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Server Time</span>
-                <span class="info-value">{{ server_time }}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Uptime</span>
-                <span class="info-value">{{ uptime }}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Active Sessions</span>
-                <span class="info-value">{{ active_sessions }}</span>
-            </div>
-        </div>
-        
-        <div class="endpoints">
-            <h3>📊 API Endpoints</h3>
-            <div class="endpoint-list">
-                <div class="endpoint">GET /health/hunter - Health Check</div>
-                <div class="endpoint">GET /stats/hunter - Statistics</div>
-                <div class="endpoint">GET /users/hunter - User Data</div>
-                <div class="endpoint">GET /status - Bot Status</div>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>Created with ❤️ by @PokiePy | Powered by Flask & Koyeb</p>
-            <p>System Time: {{ timestamp }}</p>
-        </div>
-    </div>
-    
-    <script>
-        // Auto-refresh every 60 seconds
-        setTimeout(() => {
-            location.reload();
-        }, 60000);
-        
-        // Update timestamp every second
-        function updateTime() {
-            const now = new Date();
-            document.querySelector('.footer p:last-child').textContent = 
-                `System Time: ${now.toLocaleString()}`;
-        }
-        setInterval(updateTime, 1000);
-    </script>
-</body>
-</html>'''
-
-@app.route('/')
-def home():
-    """Main dashboard page"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        # Get statistics
-        c.execute('SELECT COUNT(*) FROM swaps_history')
-        total_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-        success_swaps = c.fetchone()[0] or 0
-        
-        # Calculate success rate
-        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
-        
-        conn.close()
-        
-        # Render template
-        return render_template_string(
-            HTML_TEMPLATE,
-            status="🟢 ONLINE",
-            total_users=get_total_users(),
-            active_24h=get_active_users_count(1),
-            total_swaps=total_swaps,
-            success_rate=success_rate,
-            server_time=datetime.now().strftime('%H:%M:%S'),
-            uptime=format_time(time.time() - start_time),
-            active_sessions=len(user_data),
-            timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        )
-    except Exception as e:
-        logger.error(f"Home page error: {e}")
-        return render_template_string(
-            HTML_TEMPLATE,
-            status="🟡 OFFLINE",
-            total_users=0,
-            active_24h=0,
-            total_swaps=0,
-            success_rate=0,
-            server_time="N/A",
-            uptime="N/A",
-            active_sessions=0,
-            timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        )
-
-@app.route('/health/hunter')
-def health_hunter():
-    """Health check endpoint for monitoring"""
-    try:
-        health_data = {
-            "status": "healthy",
-            "service": "Face Swap Bot",
-            "version": "3.1",
-            "bot": "running",
-            "database": "connected",
-            "webhook": "active" if WEBHOOK_URL else "polling",
-            "metrics": {
-                "total_users": get_total_users(),
-                "active_24h": get_active_users_count(1),
-                "active_7d": get_active_users_count(7),
-                "banned_users": len(BANNED_USERS),
-                "active_swaps": len(active_swaps),
-                "active_sessions": len(user_data)
-            },
-            "timestamp": datetime.now().isoformat(),
-            "uptime": int(time.time() - start_time)
-        }
-        return jsonify(health_data), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/stats/hunter')
-def stats_hunter():
-    """Detailed statistics endpoint"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        # Swap statistics
-        c.execute('SELECT COUNT(*) FROM swaps_history')
-        total_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-        success_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
-        failed_swaps = c.fetchone()[0] or 0
-        
-        # Other statistics
-        c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
-        pending_reports = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM favorites')
-        total_favorites = c.fetchone()[0] or 0
-        
-        # Average processing time
-        c.execute('SELECT AVG(processing_time) FROM swaps_history WHERE status = "success"')
-        avg_time = c.fetchone()[0] or 0
-        
-        conn.close()
-        
-        # Calculate rates
-        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 2)
-        
-        stats_data = {
-            "users": {
-                "total": get_total_users(),
-                "active_24h": get_active_users_count(1),
-                "active_7d": get_active_users_count(7),
-                "banned": len(BANNED_USERS),
-                "verified": get_active_users_count(30)  # Approximate
-            },
-            "swaps": {
-                "total": total_swaps,
-                "successful": success_swaps,
-                "failed": failed_swaps,
-                "success_rate": success_rate,
-                "average_time": round(avg_time, 2),
-                "active": len(active_swaps)
-            },
-            "engagement": {
-                "favorites": total_favorites,
-                "pending_reports": pending_reports,
-                "active_sessions": len(user_data)
-            },
-            "performance": {
-                "response_time": 0.1,  # Placeholder
-                "api_status": "operational",
-                "database_latency": "low"
-            },
-            "timestamp": datetime.now().isoformat()
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'FaceSwapBot/3.2'
         }
         
-        return jsonify(stats_data), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/users/hunter')
-def users_hunter():
-    """User data endpoint"""
-    try:
-        users = get_all_users(limit=100)
-        
-        user_list = []
-        for user in users:
-            user_list.append({
-                "user_id": user[0],
-                "username": user[1] or "N/A",
-                "name": f"{user[2]} {user[3] or ''}".strip(),
-                "joined": user[4],
-                "last_active": user[5],
-                "banned": bool(user[6]),
-                "verified": bool(user[7]),
-                "stats": {
-                    "total_swaps": user[8],
-                    "successful": user[9],
-                    "failed": user[10]
-                }
-            })
-        
-        return jsonify({
-            "total": len(user_list),
-            "users": user_list,
-            "timestamp": datetime.now().isoformat()
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/status')
-def status_page():
-    """Simple status page"""
-    return jsonify({
-        "status": "online",
-        "bot": "@face_swap_bot",
-        "time": datetime.now().isoformat(),
-        "users": get_total_users(),
-        "uptime": int(time.time() - start_time)
-    })
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Telegram webhook endpoint"""
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        
-        # Process update in a separate thread
-        threading.Thread(target=bot.process_new_updates, args=([update],)).start()
-        
-        return '', 200
-    
-    return 'Bad request', 400
-
-@app.route('/export/users')
-def export_users_csv():
-    """Export users to CSV (admin only)"""
-    # Simple authentication check
-    token = request.args.get('token')
-    if token != hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:16]:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        users = get_all_users(limit=1000)
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write header
-        writer.writerow([
-            'User ID', 'Username', 'First Name', 'Last Name',
-            'Join Date', 'Last Active', 'Banned', 'Verified',
-            'Total Swaps', 'Successful', 'Failed'
-        ])
-        
-        # Write data
-        for user in users:
-            writer.writerow(user[:11])
-        
-        # Prepare response
-        output.seek(0)
-        mem = io.BytesIO()
-        mem.write(output.getvalue().encode('utf-8'))
-        mem.seek(0)
-        output.close()
-        
-        return send_file(
-            mem,
-            mimetype='text/csv',
-            as_attachment=True,
-            download_name=f'users_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        # Make API call
+        logger.info(f"Sending request to API: {FACE_SWAP_API_URL}")
+        response = requests.post(
+            FACE_SWAP_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=60  # Increased timeout for API
         )
+        
+        logger.info(f"API Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"API Response Keys: {list(result.keys())}")
+            
+            if 'result' in result and result['result']:
+                # Decode the base64 result image
+                result_image = base64.b64decode(result['result'])
+                logger.info(f"Successfully decoded result image: {len(result_image)} bytes")
+                return result_image
+            else:
+                logger.error(f"API response missing 'result': {result}")
+                return None
+        else:
+            logger.error(f"API Error {response.status_code}: {response.text}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        logger.error("API request timed out")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        return None
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Unexpected error in face swap API call: {e}")
+        return None
 
 # ========== BOT HANDLERS ==========
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     """Handle /start and /help commands"""
     user_id = message.from_user.id
+    chat_id = message.chat.id
     
     # Check if banned
     if user_id in BANNED_USERS:
@@ -914,6 +410,10 @@ def send_welcome(message):
         message.from_user.first_name,
         message.from_user.last_name
     )
+    
+    # Clear any existing session
+    if chat_id in user_sessions:
+        del user_sessions[chat_id]
     
     # Check channel membership
     if not check_channel_membership(user_id):
@@ -1000,7 +500,7 @@ def show_main_menu(message):
 ✓ Avoid blurry or dark images
 
 👑 <b>Created by:</b> @PokiePy
-🔄 <b>Version:</b> 3.1"""
+🔄 <b>Version:</b> 3.2"""
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -1013,26 +513,6 @@ def show_main_menu(message):
     )
     
     bot.send_message(message.chat.id, menu_text, reply_markup=markup, parse_mode='HTML')
-
-@bot.callback_query_handler(func=lambda call: call.data == "start_swap")
-def start_swap_callback(call):
-    """Handle start swap callback"""
-    start_swap_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "my_stats")
-def stats_callback(call):
-    """Handle stats callback"""
-    my_stats_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "view_favorites")
-def favorites_callback(call):
-    """Handle favorites callback"""
-    show_favorites_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "view_history")
-def history_callback(call):
-    """Handle history callback"""
-    show_history_command(call.message)
 
 @bot.message_handler(commands=['swap'])
 def start_swap_command(message):
@@ -1057,11 +537,17 @@ def start_swap_command(message):
             bot.reply_to(message, f"❌ Please join {REQUIRED_CHANNEL} first and verify!")
             return
     
-    # Initialize swap session
-    user_data[chat_id] = {
-        'state': WAITING_FOR_SOURCE,
+    # Clear any existing session
+    if chat_id in user_sessions:
+        del user_sessions[chat_id]
+    
+    # Initialize new swap session
+    user_sessions[chat_id] = {
+        'state': STATE_WAITING_SOURCE,
         'user_id': user_id,
-        'start_time': time.time()
+        'source_photo': None,
+        'target_photo': None,
+        'start_time': None
     }
     
     instructions = """🎭 <b>Face Swap Started!</b>
@@ -1086,15 +572,23 @@ def start_swap_command(message):
 👉 <b>Please send the SOURCE photo now...</b>"""
     
     bot.reply_to(message, instructions, parse_mode='HTML')
+    logger.info(f"Started swap session for user {user_id}, waiting for source photo")
+
+@bot.callback_query_handler(func=lambda call: call.data == "start_swap")
+def start_swap_callback(call):
+    """Handle start swap callback"""
+    start_swap_command(call.message)
 
 @bot.message_handler(commands=['cancel'])
 def cancel_swap_command(message):
     """Cancel the current swap"""
     chat_id = message.chat.id
     
-    if chat_id in user_data:
-        del user_data[chat_id]
+    if chat_id in user_sessions:
+        # Clear session data
+        del user_sessions[chat_id]
         
+        # Clear active swap if exists
         if chat_id in active_swaps:
             del active_swaps[chat_id]
         
@@ -1109,8 +603,364 @@ Your face swap session has been cancelled.
 We hope to see you again soon! 🎭"""
         
         bot.reply_to(message, cancel_text, parse_mode='HTML')
+        logger.info(f"Cancelled swap session for chat {chat_id}")
     else:
         bot.reply_to(message, "⚠️ No active swap to cancel. Use /swap to start a new one.")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    """Handle photo uploads for face swapping"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Check if banned
+    if user_id in BANNED_USERS:
+        bot.reply_to(message, "🚫 Your account has been banned.")
+        return
+    
+    # Check if user has an active session
+    if chat_id not in user_sessions:
+        # No active session, start one
+        bot.reply_to(message, "⚠️ No active swap session. Use /swap to start a new face swap.")
+        return
+    
+    session = user_sessions[chat_id]
+    state = session['state']
+    
+    # Get photo file
+    file_id = message.photo[-1].file_id
+    
+    if state == STATE_WAITING_SOURCE:
+        # Download source photo
+        bot.reply_to(message, "⏳ Downloading source photo...")
+        photo_data = download_telegram_photo(file_id)
+        
+        if photo_data:
+            # Store source photo and update state
+            session['source_photo'] = photo_data
+            session['state'] = STATE_WAITING_TARGET
+            session['start_time'] = time.time()
+            
+            bot.reply_to(message, """✅ <b>Source Photo Received!</b>
+
+📸 <b>Step 2 of 2:</b> Send the <b>TARGET</b> photo
+(This is the photo where the face will be placed)
+
+💡 <b>Tips for target photo:</b>
+✓ Clear, good quality image
+✓ Face should be visible
+✓ Similar lighting to source works best
+
+⏳ <b>Processing will start immediately after you send the target photo.</b>
+
+👉 <b>Please send the TARGET photo now...</b>""", parse_mode='HTML')
+            
+            logger.info(f"Source photo received for user {user_id}, waiting for target")
+        else:
+            bot.reply_to(message, "❌ Failed to download photo. Please try again.")
+    
+    elif state == STATE_WAITING_TARGET:
+        # Check if we already have source photo
+        if session['source_photo'] is None:
+            bot.reply_to(message, "⚠️ Source photo missing. Please start over with /swap")
+            del user_sessions[chat_id]
+            return
+        
+        # Download target photo
+        bot.reply_to(message, "⏳ Downloading target photo...")
+        photo_data = download_telegram_photo(file_id)
+        
+        if photo_data:
+            # Store target photo and start processing
+            session['target_photo'] = photo_data
+            session['state'] = STATE_PROCESSING
+            
+            # Start processing in a separate thread
+            threading.Thread(
+                target=process_face_swap,
+                args=(chat_id, session),
+                daemon=True
+            ).start()
+            
+            logger.info(f"Target photo received for user {user_id}, starting processing")
+        else:
+            bot.reply_to(message, "❌ Failed to download photo. Please try again.")
+    
+    elif state == STATE_PROCESSING:
+        bot.reply_to(message, """⏳ <b>Please wait</b>
+
+Your swap is currently being processed. Please wait for it to complete before sending more photos.
+
+💡 If it's taking too long, you can:
+• Wait a bit more
+• Use /cancel and start over
+• Contact support if problem persists""", parse_mode='HTML')
+    
+    else:
+        bot.reply_to(message, "⚠️ Invalid session state. Please use /swap to start over.")
+        if chat_id in user_sessions:
+            del user_sessions[chat_id]
+
+def process_face_swap(chat_id, session):
+    """Process the face swap with progress updates"""
+    user_id = session['user_id']
+    source_photo = session['source_photo']
+    target_photo = session['target_photo']
+    start_time = session['start_time']
+    
+    try:
+        # Send initial progress message
+        progress_msg = bot.send_message(
+            chat_id,
+            """🔄 <b>Processing Face Swap...</b>
+
+[░░░░░░░░░░] 0%
+⏱️ Estimated: Calculating...
+
+⚙️ <b>Initializing face detection...</b>
+💡 This may take 15-30 seconds...""",
+            parse_mode='HTML'
+        )
+        
+        # Add to active swaps tracking
+        active_swaps[chat_id] = {
+            'progress': 0,
+            'status': 'Initializing',
+            'start_time': time.time(),
+            'message_id': progress_msg.message_id
+        }
+        
+        # Simulate progress updates
+        for progress in [10, 25, 45, 65, 85]:
+            if chat_id not in active_swaps:
+                return
+                
+            time.sleep(1.5)  # Simulate processing time
+            active_swaps[chat_id]['progress'] = progress
+            
+            bar = generate_progress_bar(progress)
+            est_time = estimate_time(active_swaps[chat_id]['start_time'], progress)
+            
+            status_text = "Detecting faces..." if progress < 30 else \
+                         "Aligning features..." if progress < 60 else \
+                         "Swapping faces..." if progress < 85 else \
+                         "Finalizing..."
+            
+            try:
+                bot.edit_message_text(
+                    f"""🔄 <b>Processing Face Swap...</b>
+
+[{bar}] {progress}%
+⏱️ Estimated: {est_time}
+
+⚙️ <b>Status:</b> {status_text}
+🎯 <b>Progress:</b> {progress}% complete""",
+                    chat_id,
+                    progress_msg.message_id,
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+        
+        # Call the actual face swap API
+        logger.info(f"Calling face swap API for user {user_id}")
+        
+        # Update progress to "Processing with API"
+        try:
+            bot.edit_message_text(
+                """🔄 <b>Processing Face Swap...</b>
+
+[██████░░░░] 90%
+⏱️ Estimated: 5-10 seconds
+
+⚙️ <b>Status:</b> Swapping faces with AI...
+🎯 <b>Progress:</b> Finalizing swap""",
+                chat_id,
+                progress_msg.message_id,
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        
+        # Make API call
+        result_image = call_face_swap_api(source_photo, target_photo)
+        
+        processing_time = time.time() - start_time
+        
+        if result_image:
+            # Success - save result
+            os.makedirs('results', exist_ok=True)
+            filename = f"swap_{user_id}_{int(time.time())}.png"
+            filepath = os.path.join('results', filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(result_image)
+            
+            # Update progress to 100%
+            try:
+                bot.edit_message_text(
+                    f"""✅ <b>Face Swap Complete!</b>
+
+[██████████] 100%
+⏱️ Time: {processing_time:.1f}s
+
+🎉 <b>Success!</b> Your face swap is ready.""",
+                    chat_id,
+                    progress_msg.message_id,
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+            
+            # Add to history
+            swap_id = add_swap_history(
+                user_id,
+                "success",
+                processing_time,
+                filepath,
+                False
+            )
+            
+            # Update user stats
+            update_user_stats(user_id, True)
+            
+            # Prepare result message
+            caption = f"""✨ <b>Face Swap Complete!</b>
+
+🆔 <b>Swap ID:</b> #{swap_id}
+⏱️ <b>Time:</b> {processing_time:.1f} seconds
+✅ <b>Status:</b> Success
+
+💡 <b>Tips:</b>
+• Save to favorites for later
+• Share with friends
+• Try different photos
+
+<i>Note: Result quality depends on input photo quality.</i>"""
+            
+            # Create inline keyboard
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("⭐ Save Favorite", callback_data=f"fav_{swap_id}"),
+                types.InlineKeyboardButton("🔄 Swap Again", callback_data="start_swap")
+            )
+            
+            # Send result photo
+            with open(filepath, 'rb') as photo:
+                bot.send_photo(
+                    chat_id,
+                    photo,
+                    caption=caption,
+                    reply_markup=markup,
+                    parse_mode='HTML'
+                )
+            
+            logger.info(f"Swap successful for user {user_id}, time: {processing_time:.2f}s")
+            
+        else:
+            # API failed
+            logger.error(f"Face swap API failed for user {user_id}")
+            
+            try:
+                bot.edit_message_text(
+                    f"""❌ <b>Face Swap Failed</b>
+
+[░░░░░░░░░░] 0%
+⏱️ Time: {processing_time:.1f}s
+
+⚠️ <b>Error:</b> Processing failed
+🔄 <b>Status:</b> Please try again
+
+💡 <b>Possible reasons:</b>
+• Poor quality photos
+• No faces detected
+• API service temporary issue
+• Connection timeout
+
+🎯 <b>Solution:</b> Try with different, clearer photos.""",
+                    chat_id,
+                    progress_msg.message_id,
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+            
+            # Add to history as failed
+            add_swap_history(user_id, "failed", processing_time)
+            update_user_stats(user_id, False)
+            
+            # Offer to try again
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🔄 Try Again", callback_data="start_swap"))
+            
+            bot.send_message(
+                chat_id,
+                "😔 <b>Sorry, the face swap failed.</b>\n\nPlease try again with different photos.",
+                reply_markup=markup,
+                parse_mode='HTML'
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in process_face_swap: {e}")
+        
+        # Send error message
+        try:
+            bot.send_message(
+                chat_id,
+                f"""❌ <b>Unexpected Error</b>
+
+An unexpected error occurred during processing.
+
+⚠️ <b>Error:</b> {str(e)[:100]}
+🔄 <b>Please try again.</b>
+
+If this continues, contact support.""",
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        
+        # Add to history as failed
+        processing_time = time.time() - start_time if 'start_time' in session else 0
+        add_swap_history(user_id, "failed", processing_time)
+        update_user_stats(user_id, False)
+    
+    finally:
+        # Clean up
+        if chat_id in user_sessions:
+            del user_sessions[chat_id]
+        if chat_id in active_swaps:
+            del active_swaps[chat_id]
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('fav_'))
+def add_to_favorites_callback(call):
+    """Add swap to favorites"""
+    try:
+        swap_id = int(call.data.split('_')[1])
+        user_id = call.from_user.id
+        
+        if add_favorite(user_id, swap_id):
+            bot.answer_callback_query(call.id, "⭐ Added to favorites!")
+            
+            # Update message caption if possible
+            try:
+                if call.message.caption:
+                    new_caption = call.message.caption + "\n\n⭐ <b>Saved to Favorites!</b>"
+                    bot.edit_message_caption(
+                        chat_id=call.message.chat.id,
+                        message_id=call.message.message_id,
+                        caption=new_caption,
+                        parse_mode='HTML',
+                        reply_markup=call.message.reply_markup
+                    )
+            except:
+                pass
+        else:
+            bot.answer_callback_query(call.id, "⚠️ Already in favorites!")
+            
+    except Exception as e:
+        logger.error(f"Favorite error: {e}")
+        bot.answer_callback_query(call.id, "❌ Error saving favorite")
 
 @bot.message_handler(commands=['mystats'])
 def my_stats_command(message):
@@ -1149,15 +999,7 @@ def my_stats_command(message):
 • Success Rate: <b>{success_rate}%</b>
 
 🏆 <b>Rank:</b> {'Beginner' if total < 5 else 'Intermediate' if total < 20 else 'Expert'}
-📈 <b>Activity Level:</b> {'New User' if total == 0 else 'Active' if total > 5 else 'Casual'}
-
-💡 <b>Tip:</b> The more you swap, the better you get at choosing good photos!"""
-        
-        # Add progress bar for swaps
-        if total > 0:
-            progress = min(total * 2, 100)  # Simple progress calculation
-            bar = generate_progress_bar(progress)
-            stats_text += f"\n\n📊 <b>Progress:</b> [{bar}] {progress}%"
+📈 <b>Activity Level:</b> {'New User' if total == 0 else 'Active' if total > 5 else 'Casual'}"""
         
         bot.reply_to(message, stats_text, parse_mode='HTML')
     else:
@@ -1221,13 +1063,7 @@ def show_history_command(message):
 
 You haven't performed any swaps yet.
 
-🎭 <b>Ready to start?</b> Use /swap to create your first face swap!
-
-💡 <b>What you'll see here:</b>
-• List of all your swaps
-• Success/failure status
-• Processing time
-• Dates of each swap"""
+🎭 <b>Ready to start?</b> Use /swap to create your first face swap!"""
         
         bot.reply_to(message, no_history_text, parse_mode='HTML')
         return
@@ -1246,397 +1082,191 @@ You haven't performed any swaps yet.
         history_text += f"\n{i}. {emoji} <b>Swap #{swap_id}</b>\n"
         history_text += f"   📅 {date_str} | ⏱️ {time_str}"
     
-    history_text += "\n\n💡 <b>Tip:</b> Successful swaps usually have clear, well-lit photos."
-    
     bot.reply_to(message, history_text, parse_mode='HTML')
 
-@bot.message_handler(commands=['report'])
-def report_content_command(message):
-    """Handle report command"""
-    report_text = """🚨 <b>Report Inappropriate Content</b>
+@bot.callback_query_handler(func=lambda call: call.data == "my_stats")
+def stats_callback(call):
+    """Handle stats callback"""
+    my_stats_command(call.message)
 
-If you encounter any inappropriate content or have concerns about a swap, you can report it here.
+@bot.callback_query_handler(func=lambda call: call.data == "view_favorites")
+def favorites_callback(call):
+    """Handle favorites callback"""
+    show_favorites_command(call.message)
 
-📝 <b>How to Report:</b>
-1. Find the Swap ID (shown in swap results)
-2. Use the format: <code>Swap_ID Reason</code>
-3. Send it as a message
+@bot.callback_query_handler(func=lambda call: call.data == "view_history")
+def history_callback(call):
+    """Handle history callback"""
+    show_history_command(call.message)
 
-📋 <b>Example:</b>
-<code>123 Inappropriate content</code>
-<code>456 Copyright violation</code>
-
-⚠️ <b>Important:</b>
-• Only report genuine issues
-• False reports may lead to action
-• We review all reports within 24 hours
-
-🙏 <b>Thank you for helping keep our community safe!</b>"""
-    
-    bot.reply_to(message, report_text, parse_mode='HTML')
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    """Handle photo uploads for face swapping"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    # Check if banned
-    if user_id in BANNED_USERS:
-        bot.reply_to(message, "🚫 Your account has been banned.")
-        return
-    
-    # Get photo file
-    file_id = message.photo[-1].file_id
-    file_info = bot.get_file(file_id)
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-    
-    try:
-        # Download photo
-        response = requests.get(file_url, timeout=10)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download photo: {response.status_code}")
-        
-        photo_data = response.content
-        
-        # Handle based on swap state
-        if chat_id not in user_data:
-            # Starting new swap
-            user_data[chat_id] = {
-                'state': WAITING_FOR_TARGET,
-                'source_photo': photo_data,
-                'user_id': user_id,
-                'start_time': time.time()
-            }
-            
-            bot.reply_to(message, """✅ <b>Source Photo Received!</b>
-
-📸 <b>Step 2 of 2:</b> Send the <b>TARGET</b> photo
-(This is the photo where the face will be placed)
-
-💡 <b>Tips for target photo:</b>
-✓ Clear, good quality image
-✓ Face should be visible
-✓ Similar lighting to source works best
-
-⏳ <b>Processing will start immediately after you send the target photo.</b>
-
-👉 <b>Please send the TARGET photo now...</b>""", parse_mode='HTML')
-            
-        elif user_data[chat_id]['state'] == WAITING_FOR_TARGET:
-            # Got target photo, start processing
-            user_data[chat_id]['target_photo'] = photo_data
-            user_data[chat_id]['state'] = 'processing'
-            
-            # Start processing
-            process_face_swap(chat_id, message)
-            
-        else:
-            # Already processing or invalid state
-            bot.reply_to(message, """⚠️ <b>Please wait</b>
-
-Your swap is currently being processed. Please wait for it to complete before sending more photos.
-
-⏳ If it's taking too long, you can:
-• Wait a bit more
-• Use /cancel and start over
-• Contact support if problem persists""", parse_mode='HTML')
-            
-    except Exception as e:
-        logger.error(f"Error handling photo: {e}")
-        bot.reply_to(message, "❌ <b>Error processing photo</b>\n\nPlease try again with a different photo or try again later.", parse_mode='HTML')
-        
-        # Clean up session
-        if chat_id in user_data:
-            del user_data[chat_id]
-
-def process_face_swap(chat_id, message):
-    """Process the face swap with progress updates"""
-    try:
-        user_session = user_data[chat_id]
-        user_id = user_session['user_id']
-        
-        # Create progress message
-        progress_msg = bot.reply_to(message, """🔄 <b>Processing Face Swap...</b>
-
-[░░░░░░░░░░] 0%
-⏱️ Estimated: Calculating...
-
-⚙️ <b>Steps:</b>
-1. Analyzing photos
-2. Detecting faces
-3. Swapping faces
-4. Finalizing result
-
-💡 <b>Please wait, this may take 15-30 seconds...</b>""", parse_mode='HTML')
-        
-        # Add to active swaps
-        active_swaps[chat_id] = {
-            'progress': 0,
-            'status': 'Initializing...',
-            'start_time': time.time(),
-            'progress_msg_id': progress_msg.message_id
+# ========== FLASK ROUTES ==========
+HTML_TEMPLATE = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Swap Bot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
         }
-        
-        # Simulate progress updates (you would replace this with actual API progress)
-        for progress in [10, 25, 45, 65, 85]:
-            time.sleep(1.5)
-            
-            if chat_id not in active_swaps:
-                return
-            
-            active_swaps[chat_id]['progress'] = progress
-            bar = generate_progress_bar(progress)
-            est_time = estimate_time(active_swaps[chat_id]['start_time'], progress)
-            
-            status_text = "Analyzing faces" if progress < 30 else \
-                         "Swapping faces" if progress < 70 else \
-                         "Finalizing result"
-            
-            try:
-                bot.edit_message_text(
-                    f"""🔄 <b>Processing Face Swap...</b>
-
-[{bar}] {progress}%
-⏱️ Estimated: {est_time}
-
-⚙️ <b>Status:</b> {status_text}
-🎯 <b>Progress:</b> {progress}% complete
-
-💡 <b>Almost there...</b>""",
-                    chat_id,
-                    progress_msg.message_id,
-                    parse_mode='HTML'
-                )
-            except:
-                pass
-        
-        # Prepare API request
-        source_b64 = base64.b64encode(user_session['source_photo']).decode('utf-8')
-        target_b64 = base64.b64encode(user_session['target_photo']).decode('utf-8')
-        
-        api_data = {
-            'source': source_b64,
-            'target': target_b64,
-            'security': {
-                'token': FACE_SWAP_API_TOKEN,
-                'type': 'invisible',
-                'id': 'deepswapper'
-            }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
+        h1 {
+            color: #667eea;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .status {
+            background: #d4edda;
+            color: #155724;
+            padding: 10px 20px;
+            border-radius: 20px;
+            display: inline-block;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        .stats {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+        .label {
+            font-weight: 600;
+            color: #555;
+        }
+        .value {
+            color: #667eea;
+            font-weight: 700;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #999;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Face Swap Bot</h1>
+        <div class="status">{{ status }}</div>
+        <div class="stats">
+            <div class="stat-item">
+                <span class="label">Total Users</span>
+                <span class="value">{{ total_users }}</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Active (24h)</span>
+                <span class="value">{{ active_24h }}</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Total Swaps</span>
+                <span class="value">{{ total_swaps }}</span>
+            </div>
+            <div class="stat-item">
+                <span class="label">Success Rate</span>
+                <span class="value">{{ success_rate }}%</span>
+            </div>
+        </div>
+        <div class="footer">
+            <p>Created by @PokiePy | v3.2</p>
+            <p>Server Time: {{ server_time }}</p>
+        </div>
+    </div>
+</body>
+</html>'''
+
+@app.route('/')
+def home():
+    """Main dashboard page"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
         
-        # Make API request
-        response = requests.post(
-            FACE_SWAP_API_URL,
-            json=api_data,
-            headers={'Content-Type': 'application/json'},
-            timeout=30
+        c.execute('SELECT COUNT(*) FROM swaps_history')
+        total_swaps = c.fetchone()[0] or 0
+        
+        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
+        success_swaps = c.fetchone()[0] or 0
+        
+        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
+        conn.close()
+        
+        return render_template_string(
+            HTML_TEMPLATE,
+            status="🟢 ONLINE",
+            total_users=get_total_users(),
+            active_24h=0,  # You can implement this function
+            total_swaps=total_swaps,
+            success_rate=success_rate,
+            server_time=datetime.now().strftime('%H:%M:%S')
         )
-        
-        processing_time = time.time() - user_session['start_time']
-        
-        if response.status_code == 200:
-            result_data = response.json()
-            
-            if 'result' in result_data and result_data['result']:
-                # Decode result image
-                result_image = base64.b64decode(result_data['result'])
-                
-                # Save result
-                os.makedirs('results', exist_ok=True)
-                filename = f"swap_{user_id}_{int(time.time())}.png"
-                filepath = os.path.join('results', filename)
-                
-                with open(filepath, 'wb') as f:
-                    f.write(result_image)
-                
-                # Update progress to 100%
-                active_swaps[chat_id]['progress'] = 100
-                
-                try:
-                    bot.edit_message_text(
-                        f"""✅ <b>Face Swap Complete!</b>
-
-[██████████] 100%
-⏱️ Time: {processing_time:.1f}s
-
-🎉 <b>Success!</b> Your face swap is ready.""",
-                        chat_id,
-                        progress_msg.message_id,
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-                
-                # Add to history
-                swap_id = add_swap_history(
-                    user_id,
-                    "success",
-                    processing_time,
-                    filepath,
-                    False
-                )
-                
-                # Update user stats
-                update_user_stats(user_id, True)
-                
-                # Prepare result message
-                caption = f"""✨ <b>Face Swap Complete!</b>
-
-🆔 <b>Swap ID:</b> #{swap_id}
-⏱️ <b>Time:</b> {processing_time:.1f} seconds
-✅ <b>Status:</b> Success
-
-💡 <b>Tips:</b>
-• Save to favorites for later
-• Share with friends
-• Try different photos
-
-<i>Note: Result quality depends on input photo quality.</i>"""
-                
-                # Create inline keyboard
-                markup = types.InlineKeyboardMarkup(row_width=2)
-                markup.add(
-                    types.InlineKeyboardButton("⭐ Save Favorite", callback_data=f"fav_{swap_id}"),
-                    types.InlineKeyboardButton("🔄 Swap Again", callback_data="start_swap")
-                )
-                markup.add(
-                    types.InlineKeyboardButton("📊 View Stats", callback_data="my_stats"),
-                    types.InlineKeyboardButton("🚨 Report Issue", callback_data=f"report_{swap_id}")
-                )
-                
-                # Send result photo
-                with open(filepath, 'rb') as photo:
-                    bot.send_photo(
-                        chat_id,
-                        photo,
-                        caption=caption,
-                        reply_markup=markup,
-                        parse_mode='HTML'
-                    )
-                
-                logger.info(f"Swap successful: User={user_id}, Time={processing_time:.2f}s")
-                
-            else:
-                raise Exception("No result in API response")
-                
-        else:
-            raise Exception(f"API error: {response.status_code}")
-            
     except Exception as e:
-        logger.error(f"Face swap error: {e}")
-        
-        processing_time = time.time() - user_session.get('start_time', time.time())
-        
-        # Update progress message
-        try:
-            bot.edit_message_text(
-                f"""❌ <b>Face Swap Failed</b>
+        logger.error(f"Home page error: {e}")
+        return render_template_string(
+            HTML_TEMPLATE,
+            status="🟡 OFFLINE",
+            total_users=0,
+            active_24h=0,
+            total_swaps=0,
+            success_rate=0,
+            server_time=datetime.now().strftime('%H:%M:%S')
+        )
 
-[░░░░░░░░░░] 0%
-⏱️ Time: {processing_time:.1f}s
-
-⚠️ <b>Error:</b> Processing failed
-🔄 <b>Status:</b> Please try again
-
-💡 <b>Possible reasons:</b>
-• Poor quality photos
-• No faces detected
-• API service temporary issue
-• Connection timeout
-
-🎯 <b>Solution:</b> Try with different, clearer photos.""",
-                chat_id,
-                active_swaps[chat_id]['progress_msg_id'],
-                parse_mode='HTML'
-            )
-        except:
-            pass
-        
-        # Add to history as failed
-        add_swap_history(user_id, "failed", processing_time)
-        update_user_stats(user_id, False)
-        
-    finally:
-        # Clean up
-        if chat_id in user_data:
-            del user_data[chat_id]
-        if chat_id in active_swaps:
-            del active_swaps[chat_id]
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('fav_'))
-def add_to_favorites_callback(call):
-    """Add swap to favorites"""
+@app.route('/health/hunter')
+def health_hunter():
+    """Health check endpoint"""
     try:
-        swap_id = int(call.data.split('_')[1])
-        user_id = call.from_user.id
-        
-        if add_favorite(user_id, swap_id):
-            bot.answer_callback_query(call.id, "⭐ Added to favorites!")
-            
-            # Update message caption
-            if call.message.caption:
-                new_caption = call.message.caption + "\n\n⭐ <b>Saved to Favorites!</b>"
-                bot.edit_message_caption(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    caption=new_caption,
-                    parse_mode='HTML',
-                    reply_markup=call.message.reply_markup
-                )
-        else:
-            bot.answer_callback_query(call.id, "⚠️ Already in favorites!")
-            
+        return jsonify({
+            "status": "healthy",
+            "service": "Face Swap Bot",
+            "version": "3.2",
+            "bot": "running",
+            "database": "connected",
+            "active_sessions": len(user_sessions),
+            "active_swaps": len(active_swaps),
+            "timestamp": datetime.now().isoformat()
+        }), 200
     except Exception as e:
-        logger.error(f"Favorite error: {e}")
-        bot.answer_callback_query(call.id, "❌ Error saving favorite")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('report_'))
-def report_swap_callback(call):
-    """Report a swap"""
-    swap_id = call.data.split('_')[1]
-    
-    # Ask for reason
-    msg = bot.send_message(
-        call.message.chat.id,
-        f"🚨 <b>Reporting Swap #{swap_id}</b>\n\nPlease describe the issue (inappropriate content, etc.):",
-        parse_mode='HTML'
-    )
-    
-    # Store context for next message
-    bot.register_next_step_handler(msg, lambda m: process_report(m, swap_id, call.from_user.id))
-
-def process_report(message, swap_id, reporter_id):
-    """Process the report"""
-    reason = message.text.strip()
-    
-    if len(reason) < 5:
-        bot.reply_to(message, "❌ Please provide a detailed reason (at least 5 characters).")
-        return
-    
-    # Add report to database
-    report_id = add_report(reporter_id, int(swap_id), reason)
-    
-    # Notify admin
-    try:
-        admin_msg = f"""🚨 <b>NEW REPORT</b>
-
-🆔 <b>Report ID:</b> #{report_id}
-👤 <b>Reporter:</b> {reporter_id}
-🔄 <b>Swap ID:</b> #{swap_id}
-📝 <b>Reason:</b> {reason[:200]}
-🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-
-⚠️ <b>Action Required:</b> Please review this report."""
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Telegram webhook endpoint"""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
         
-        bot.send_message(ADMIN_ID, admin_msg, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Failed to notify admin: {e}")
+        # Process update
+        bot.process_new_updates([update])
+        
+        return '', 200
     
-    # Confirm to user
-    bot.reply_to(message, f"✅ <b>Report Submitted</b>\n\nThank you for your report (ID: #{report_id}). We will review it within 24 hours.", parse_mode='HTML')
+    return 'Bad request', 400
 
-# ========== ADMIN COMMANDS ==========
+# ========== ADMIN COMMANDS (Simplified) ==========
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     """Admin panel access"""
@@ -1646,666 +1276,80 @@ def admin_panel(message):
     
     admin_text = f"""👑 <b>Admin Panel</b>
 
-🆔 <b>Admin ID:</b> <code>{ADMIN_ID}</code>
-🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-🌐 <b>Mode:</b> {'Webhook' if WEBHOOK_URL else 'Polling'}
-
 📊 <b>Statistics:</b>
 • Users: {get_total_users()}
-• Active (24h): {get_active_users_count(1)}
-• Banned: {len(BANNED_USERS)}
+• Active Sessions: {len(user_sessions)}
 • Active Swaps: {len(active_swaps)}
+• Banned Users: {len(BANNED_USERS)}
 
-⚙️ <b>Admin Commands:</b>
-/users - List all users
+⚙️ <b>Commands:</b>
+/users - List users
 /ban [id] - Ban user
 /unban [id] - Unban user
-/botstatus - Bot status
-/reports - View reports
-/broadcast - Send message
-/exportdata - Export data
-/stats - Detailed stats
-
-🔧 <b>Quick Actions:</b>"""
+/botstatus - Bot status"""
     
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("📋 View Users", callback_data="admin_users"),
-        types.InlineKeyboardButton("🚨 View Reports", callback_data="admin_reports")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📊 Full Stats", callback_data="admin_stats"),
-        types.InlineKeyboardButton("🔄 Bot Status", callback_data="admin_status")
-    )
-    
-    bot.reply_to(message, admin_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.message_handler(commands=['users'])
-def list_users_command(message):
-    """List all users (admin only)"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    users = get_all_users(limit=50)
-    
-    if not users:
-        bot.reply_to(message, "📭 No users found.")
-        return
-    
-    # Pagination
-    page = 0
-    users_per_page = 5
-    total_pages = (len(users) + users_per_page - 1) // users_per_page
-    
-    # Get current page users
-    start_idx = page * users_per_page
-    end_idx = min(start_idx + users_per_page, len(users))
-    page_users = users[start_idx:end_idx]
-    
-    users_text = f"""👥 <b>User Management</b>
-
-📊 <b>Total Users:</b> {len(users)}
-📑 <b>Page:</b> {page + 1}/{total_pages}
-
-━━━━━━━━━━━━━━━━━━\n"""
-    
-    for user in page_users:
-        user_id, username, first_name, last_name, join_date, last_active, banned, verified, total, success, failed = user
-        
-        status = "🔴 BANNED" if banned else "🟢 ACTIVE"
-        verified_status = "✅" if verified else "❌"
-        username_display = f"@{username}" if username else f"ID:{user_id}"
-        
-        users_text += f"\n🆔 <b>{user_id}</b>\n"
-        users_text += f"👤 {username_display}\n"
-        users_text += f"📛 {first_name} {last_name or ''}\n"
-        users_text += f"📊 {status} | Verified: {verified_status}\n"
-        users_text += f"🔄 Swaps: {total} (✅{success} ❌{failed})\n"
-        users_text += f"📅 Joined: {join_date[:10] if join_date else 'N/A'}\n"
-        users_text += f"━━━━━━━━━━━━━━━━━━\n"
-    
-    # Create inline keyboard with user actions
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    for user in page_users:
-        user_id = user[0]
-        username = user[1] or f"ID:{user_id}"
-        is_banned = user[6]
-        
-        if is_banned:
-            markup.add(types.InlineKeyboardButton(
-                f"🟢 Unban {username[:15]}",
-                callback_data=f"admin_unban_{user_id}"
-            ))
-        else:
-            markup.add(types.InlineKeyboardButton(
-                f"🔴 Ban {username[:15]}",
-                callback_data=f"admin_ban_{user_id}"
-            ))
-    
-    # Add navigation buttons
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton("⬅️ Previous", callback_data=f"admin_users_page_{page-1}"))
-    
-    if page < total_pages - 1:
-        nav_buttons.append(types.InlineKeyboardButton("Next ➡️", callback_data=f"admin_users_page_{page+1}"))
-    
-    if nav_buttons:
-        markup.row(*nav_buttons)
-    
-    markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_users_refresh"))
-    
-    bot.reply_to(message, users_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_ban_'))
-def admin_ban_callback(call):
-    """Ban user from admin panel"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    user_id = int(call.data.split('_')[2])
-    ban_user(user_id)
-    
-    # Try to notify user
-    try:
-        bot.send_message(user_id, "🚫 <b>You have been banned from using this bot.</b>", parse_mode='HTML')
-    except:
-        pass
-    
-    bot.answer_callback_query(call.id, f"✅ User {user_id} banned!")
-    
-    # Update the message
-    list_users_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_unban_'))
-def admin_unban_callback(call):
-    """Unban user from admin panel"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    user_id = int(call.data.split('_')[2])
-    unban_user(user_id)
-    
-    # Try to notify user
-    try:
-        bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML')
-    except:
-        pass
-    
-    bot.answer_callback_query(call.id, f"✅ User {user_id} unbanned!")
-    
-    # Update the message
-    list_users_command(call.message)
-
-@bot.message_handler(commands=['ban'])
-def ban_command(message):
-    """Ban a user by ID"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /ban <user_id>")
-            return
-        
-        user_id = int(parts[1])
-        ban_user(user_id)
-        
-        # Try to notify user
-        try:
-            bot.send_message(user_id, "🚫 <b>You have been banned from using this bot.</b>", parse_mode='HTML')
-        except:
-            pass
-        
-        bot.reply_to(message, f"✅ User {user_id} has been banned.")
-        
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
-
-@bot.message_handler(commands=['unban'])
-def unban_command(message):
-    """Unban a user by ID"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /unban <user_id>")
-            return
-        
-        user_id = int(parts[1])
-        unban_user(user_id)
-        
-        # Try to notify user
-        try:
-            bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML')
-        except:
-            pass
-        
-        bot.reply_to(message, f"✅ User {user_id} has been unbanned.")
-        
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+    bot.reply_to(message, admin_text, parse_mode='HTML')
 
 @bot.message_handler(commands=['botstatus'])
 def bot_status_command(message):
-    """Show detailed bot status (admin only)"""
+    """Show bot status"""
     if message.from_user.id != ADMIN_ID:
         return
     
-    # Get statistics
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history')
-    total_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-    success_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
-    failed_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
-    verified_users = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
-    pending_reports = c.fetchone()[0] or 0
-    
-    # Get recent activity
-    c.execute('''SELECT user_id, status, swap_date FROM swaps_history 
-        ORDER BY swap_date DESC LIMIT 5''')
-    recent_activity = c.fetchall()
-    
-    conn.close()
-    
-    # Calculate rates
-    success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
-    
-    status_text = f"""🤖 <b>BOT STATUS REPORT</b>
+    status_text = f"""🤖 <b>Bot Status</b>
 
-━━━━━━━━━━━━━━━━━━━━━━━━
-📊 <b>USER STATISTICS:</b>
-• Total Users: <b>{get_total_users()}</b>
-• Active (24h): <b>{get_active_users_count(1)}</b>
-• Active (7d): <b>{get_active_users_count(7)}</b>
-• Verified Users: <b>{verified_users}</b>
-• Banned Users: <b>{len(BANNED_USERS)}</b>
+🟢 <b>Status:</b> Operational
+📡 <b>Mode:</b> Webhook
+👥 <b>Active Sessions:</b> {len(user_sessions)}
+🔄 <b>Active Swaps:</b> {len(active_swaps)}
+⏰ <b>Uptime:</b> {int(time.time() - start_time)}s
+💾 <b>Database:</b> Connected
 
-🔄 <b>SWAP STATISTICS:</b>
-• Total Swaps: <b>{total_swaps}</b>
-• Successful: <b>{success_swaps}</b>
-• Failed: <b>{failed_swaps}</b>
-• Success Rate: <b>{success_rate}%</b>
-• Active Swaps: <b>{len(active_swaps)}</b>
-
-📱 <b>CURRENT SESSIONS:</b>
-• Active Sessions: <b>{len(user_data)}</b>
-• Memory Usage: <b>{sys.getsizeof(user_data) + sys.getsizeof(active_swaps):,} bytes</b>
-
-⚠️ <b>MODERATION:</b>
-• Pending Reports: <b>{pending_reports}</b>
-• Total Favorites: <b>{len(get_user_favorites(1)[:1]) if get_user_favorites(1) else 0}</b>
-
-🔧 <b>SYSTEM STATUS:</b>
-• Bot: <b>✅ RUNNING</b>
-• Database: <b>✅ CONNECTED</b>
-• API: <b>✅ AVAILABLE</b>
-• Webhook: <b>{'✅ ACTIVE' if WEBHOOK_URL else '❌ INACTIVE'}</b>
-• Uptime: <b>{format_time(time.time() - start_time)}</b>
-
-🕒 <b>RECENT ACTIVITY:</b>\n"""
-    
-    for user_id, status, swap_date in recent_activity:
-        emoji = "✅" if status == "success" else "❌"
-        time_ago = datetime.now() - datetime.strptime(swap_date[:19], '%Y-%m-%d %H:%M:%S')
-        hours_ago = int(time_ago.total_seconds() / 3600)
-        status_text += f"• {emoji} User {user_id}: {status} ({hours_ago}h ago)\n"
-    
-    status_text += """━━━━━━━━━━━━━━━━━━━━━━━━
-
-<b>ADMIN COMMANDS:</b>
-/users - User management
-/ban /unban - User control
-/reports - View reports
-/broadcast - Send message
-/exportdata - Export data
-/stats - Detailed statistics
-
-💡 <b>Health Endpoints:</b>
+🌐 <b>Endpoints:</b>
 • /health/hunter - Health check
-• /stats/hunter - Statistics
-• /users/hunter - User data"""
+• / - Dashboard
+• /webhook - Telegram webhook"""
     
     bot.reply_to(message, status_text, parse_mode='HTML')
 
-@bot.message_handler(commands=['reports'])
-def view_reports_command(message):
-    """View all reports (admin only)"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''SELECT r.id, r.reporter_id, r.reported_swap_id, r.reason, 
-        r.report_date, r.status, u.username 
-        FROM reports r
-        LEFT JOIN users u ON r.reporter_id = u.user_id
-        ORDER BY r.report_date DESC 
-        LIMIT 10''')
-    
-    reports = c.fetchall()
-    conn.close()
-    
-    if not reports:
-        bot.reply_to(message, "📭 No reports found.")
-        return
-    
-    reports_text = f"""🚨 <b>REPORT MANAGEMENT</b>
-
-📊 <b>Total Reports:</b> {len(reports)}
-
-━━━━━━━━━━━━━━━━━━\n"""
-    
-    for report in reports:
-        report_id, reporter_id, swap_id, reason, report_date, status, username = report
-        
-        status_emoji = "🟡" if status == "pending" else "✅"
-        username_display = f"@{username}" if username else f"ID:{reporter_id}"
-        
-        reports_text += f"\n{status_emoji} <b>Report #{report_id}</b>\n"
-        reports_text += f"👤 Reporter: {username_display}\n"
-        reports_text += f"🔄 Swap ID: #{swap_id}\n"
-        reports_text += f"📝 Reason: {reason[:100]}{'...' if len(reason) > 100 else ''}\n"
-        reports_text += f"⏰ Date: {report_date[:16] if report_date else 'N/A'}\n"
-        reports_text += f"📊 Status: {status.upper()}\n"
-        reports_text += f"━━━━━━━━━━━━━━━━━━\n"
-    
-    # Create inline keyboard for actions
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    for report in reports[:5]:  # Show actions for first 5 reports
-        report_id = report[0]
-        markup.add(types.InlineKeyboardButton(
-            f"✅ Resolve #{report_id}",
-            callback_data=f"admin_resolve_{report_id}"
-        ))
-    
-    markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_reports_refresh"))
-    
-    bot.reply_to(message, reports_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast_command(message):
-    """Broadcast message to all users (admin only)"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    # Get message text
-    broadcast_text = message.text.replace('/broadcast', '', 1).strip()
-    
-    if not broadcast_text:
-        bot.reply_to(message, """📢 <b>Broadcast Usage:</b>
-
-<code>/broadcast Your message here</code>
-
-💡 <b>Example:</b>
-<code>/broadcast New feature added! Check /help for details.</code>
-
-⚠️ <b>Note:</b> This will send to all users except banned ones.""", parse_mode='HTML')
-        return
-    
-    # Confirm broadcast
-    confirm_text = f"""📢 <b>BROADCAST CONFIRMATION</b>
-
-<b>Message:</b>
-{broadcast_text}
-
-<b>Recipients:</b> {get_total_users() - len(BANNED_USERS)} users
-<b>Banned users excluded:</b> {len(BANNED_USERS)}
-
-⚠️ <b>Are you sure you want to send this broadcast?</b>"""
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("✅ Send Broadcast", callback_data=f"broadcast_confirm_{hashlib.md5(broadcast_text.encode()).hexdigest()[:8]}"),
-        types.InlineKeyboardButton("❌ Cancel", callback_data="broadcast_cancel")
-    )
-    
-    bot.reply_to(message, confirm_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('broadcast_confirm_'))
-def confirm_broadcast_callback(call):
-    """Confirm and send broadcast"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    # Extract message from original message
-    original_text = call.message.text
-    lines = original_text.split('\n')
-    
-    # Find message content (between "Message:" and "Recipients:")
-    message_start = None
-    message_end = None
-    
-    for i, line in enumerate(lines):
-        if "Message:" in line:
-            message_start = i + 1
-        if "Recipients:" in line and message_start is not None:
-            message_end = i
-            break
-    
-    if message_start is None or message_end is None:
-        bot.answer_callback_query(call.id, "❌ Could not extract message.")
-        return
-    
-    broadcast_text = '\n'.join(lines[message_start:message_end]).strip()
-    
-    # Update message to show sending status
-    bot.edit_message_text(
-        "📢 <b>Sending broadcast...</b>\n\n⏳ Please wait, this may take a while.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-    
-    # Get all users
-    users = get_all_users(limit=1000)
-    sent_count = 0
-    failed_count = 0
-    
-    # Send to each user
-    for user in users:
-        user_id = user[0]
-        
-        # Skip banned users
-        if user_id in BANNED_USERS:
-            continue
-        
-        try:
-            bot.send_message(
-                user_id,
-                f"""📢 <b>Announcement from Admin</b>
-
-{broadcast_text}
-
-<i>This is an automated message from Face Swap Bot.</i>""",
-                parse_mode='HTML'
-            )
-            sent_count += 1
-            time.sleep(0.05)  # Rate limiting
-            
-        except Exception as e:
-            logger.error(f"Failed to send broadcast to {user_id}: {e}")
-            failed_count += 1
-    
-    # Update message with results
-    result_text = f"""✅ <b>Broadcast Complete!</b>
-
-📊 <b>Results:</b>
-• Sent: <b>{sent_count}</b> users
-• Failed: <b>{failed_count}</b> users
-• Total Attempted: <b>{sent_count + failed_count}</b>
-
-🕒 <b>Completed at:</b> {datetime.now().strftime('%H:%M:%S')}
-
-💡 <b>Note:</b> Failed sends are usually due to users blocking the bot or deleted accounts."""
-    
-    bot.edit_message_text(
-        result_text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "broadcast_cancel")
-def cancel_broadcast_callback(call):
-    """Cancel broadcast"""
-    bot.edit_message_text(
-        "❌ <b>Broadcast cancelled.</b>",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.message_handler(commands=['exportdata'])
-def export_data_command(message):
-    """Export data as CSV (admin only)"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    # Create export
-    export_text = """📊 <b>Data Export</b>
-
-Choose what data to export:
-
-1️⃣ <b>Users Data</b> - All user information
-2️⃣ <b>Swaps History</b> - All swap records
-3️⃣ <b>Reports Data</b> - All reports
-4️⃣ <b>Favorites Data</b> - All favorite swaps
-
-💡 <b>Note:</b> Data will be sent as CSV files."""
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👥 Users", callback_data="export_users"),
-        types.InlineKeyboardButton("🔄 Swaps", callback_data="export_swaps")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🚨 Reports", callback_data="export_reports"),
-        types.InlineKeyboardButton("⭐ Favorites", callback_data="export_favorites")
-    )
-    
-    bot.reply_to(message, export_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('export_'))
-def handle_export_callback(call):
-    """Handle export callbacks"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    export_type = call.data.replace('export_', '')
-    
-    # Create CSV data based on type
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        if export_type == 'users':
-            c.execute('SELECT * FROM users')
-            data = c.fetchall()
-            filename = 'users.csv'
-            headers = ['User ID', 'Username', 'First Name', 'Last Name', 'Join Date', 
-                      'Last Active', 'Banned', 'Verified', 'Swaps Count', 
-                      'Successful Swaps', 'Failed Swaps', 'Data Hash']
-        
-        elif export_type == 'swaps':
-            c.execute('SELECT * FROM swaps_history')
-            data = c.fetchall()
-            filename = 'swaps.csv'
-            headers = ['ID', 'User ID', 'Swap Date', 'Status', 'Processing Time', 
-                      'Result Path', 'Is Favorite', 'Is Reviewed', 'NSFW Detected']
-        
-        elif export_type == 'reports':
-            c.execute('SELECT * FROM reports')
-            data = c.fetchall()
-            filename = 'reports.csv'
-            headers = ['ID', 'Reporter ID', 'Reported Swap ID', 'Reason', 
-                      'Report Date', 'Status', 'Admin Notes']
-        
-        elif export_type == 'favorites':
-            c.execute('SELECT * FROM favorites')
-            data = c.fetchall()
-            filename = 'favorites.csv'
-            headers = ['ID', 'User ID', 'Swap ID', 'Saved Date']
-        
-        else:
-            bot.answer_callback_query(call.id, "❌ Invalid export type.")
-            return
-        
-        conn.close()
-        
-        # Create CSV
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(headers)
-        
-        for row in data:
-            writer.writerow(row)
-        
-        # Prepare file for sending
-        output.seek(0)
-        csv_data = output.getvalue().encode('utf-8')
-        output.close()
-        
-        # Send file
-        bot.send_document(
-            call.message.chat.id,
-            (filename, csv_data),
-            caption=f"📊 {export_type.capitalize()} Data Export\n\n🕒 Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n📁 Rows: {len(data)}"
-        )
-        
-        bot.answer_callback_query(call.id, f"✅ {export_type.capitalize()} exported!")
-        
-    except Exception as e:
-        logger.error(f"Export error: {e}")
-        bot.answer_callback_query(call.id, "❌ Export failed!")
-
+# ========== DEFAULT HANDLER ==========
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     """Handle all other messages"""
     chat_id = message.chat.id
     
-    if chat_id in user_data:
-        state = user_data[chat_id].get('state')
+    if chat_id in user_sessions:
+        state = user_sessions[chat_id].get('state')
         
-        if state == WAITING_FOR_SOURCE:
-            bot.reply_to(message, "📸 Please send the SOURCE photo first.")
-        elif state == WAITING_FOR_TARGET:
+        if state == STATE_WAITING_SOURCE:
+            bot.reply_to(message, "📸 Please send the SOURCE photo to start the swap.")
+        elif state == STATE_WAITING_TARGET:
             bot.reply_to(message, "📸 Please send the TARGET photo to complete the swap.")
-        elif state == 'processing':
+        elif state == STATE_PROCESSING:
             bot.reply_to(message, "⏳ Your swap is being processed. Please wait...")
         else:
-            bot.reply_to(message, "🔄 Please use /swap to start a new face swap or /help for instructions.")
+            bot.reply_to(message, "🔄 Please use /swap to start a new face swap.")
     else:
-        # Check if it's a report
-        text = message.text.strip()
-        if text and text[0].isdigit() and ' ' in text:
-            # Might be a report in format "ID Reason"
-            parts = text.split(' ', 1)
-            if parts[0].isdigit() and len(parts) > 1:
-                try:
-                    swap_id = int(parts[0])
-                    reason = parts[1]
-                    
-                    # Add report
-                    report_id = add_report(message.from_user.id, swap_id, reason)
-                    
-                    bot.reply_to(message, f"✅ Report #{report_id} submitted. Thank you!")
-                    return
-                except:
-                    pass
-        
-        # Default response
         help_text = """🤖 <b>Face Swap Bot</b>
 
-I didn't understand that command. Here's what I can do:
+I can help you swap faces between photos!
 
-🎭 <b>Main Commands:</b>
+🎭 <b>Commands:</b>
 /start - Start the bot
-/help - Show help message
 /swap - Start a new face swap
 /mystats - View your statistics
 /favorites - View saved swaps
 /history - View swap history
 /cancel - Cancel current swap
-/report - Report content
+/help - Show help
 
-💡 <b>Need help?</b> Use /help for detailed instructions.
-
-👑 <b>Admin commands available for authorized users.</b>"""
+💡 <b>Tip:</b> Use clear, front-facing photos for best results!"""
         
         bot.reply_to(message, help_text, parse_mode='HTML')
 
-# ========== WEBHOOK SETUP ==========
+# ========== MAIN FUNCTION ==========
 def setup_webhook():
     """Setup webhook for Telegram bot"""
-    if not WEBHOOK_URL:
-        logger.info("Running in polling mode")
-        return False
-    
     try:
         # Remove existing webhook
         bot.remove_webhook()
@@ -2321,40 +1365,17 @@ def setup_webhook():
         logger.error(f"Failed to setup webhook: {e}")
         return False
 
-# ========== MAIN FUNCTION ==========
-def run_bot():
-    """Run the bot in polling mode"""
-    logger.info("Starting bot in polling mode...")
-    
-    try:
-        bot.infinity_polling(
-            timeout=30,
-            long_polling_timeout=30,
-            logger_level=logging.INFO
-        )
-    except Exception as e:
-        logger.error(f"Bot polling error: {e}")
-        return False
-    
-    return True
-
 def run_flask():
     """Run the Flask web server"""
     logger.info(f"Starting Flask server on port {BOT_PORT}...")
     
-    try:
-        app.run(
-            host='0.0.0.0',
-            port=BOT_PORT,
-            debug=False,
-            use_reloader=False,
-            threaded=True
-        )
-    except Exception as e:
-        logger.error(f"Flask server error: {e}")
-        return False
-    
-    return True
+    app.run(
+        host='0.0.0.0',
+        port=BOT_PORT,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
 
 def main():
     """Main application entry point"""
@@ -2363,57 +1384,25 @@ def main():
     
     # Print banner
     print("=" * 70)
-    print("🤖 ENHANCED FACE SWAP BOT v3.1")
+    print("🤖 FACE SWAP BOT v3.2 - FIXED")
     print("=" * 70)
     print(f"👑 Admin ID: {ADMIN_ID}")
     print(f"📢 Required Channel: {REQUIRED_CHANNEL}")
-    print(f"🌐 Webhook URL: {WEBHOOK_URL or 'None (Polling)'}")
+    print(f"🌐 Webhook URL: {WEBHOOK_URL}")
     print(f"🚀 Bot Port: {BOT_PORT}")
     print("=" * 70)
-    print("✨ FEATURES:")
-    print("• Real-time face swapping with progress tracking")
-    print("• Channel verification system")
-    print("• Save favorites & view history")
-    print("• Report system with admin review")
-    print("• Admin panel with inline user management")
-    print("• Broadcast messaging to all users")
-    print("• Data export (CSV format)")
-    print("• Web dashboard with statistics")
-    print("• Health monitoring endpoints")
-    print("=" * 70)
-    print("👑 ADMIN COMMANDS:")
-    print("/admin - Admin panel")
-    print("/users - User management")
-    print("/ban /unban - User control")
-    print("/botstatus - Detailed status")
-    print("/reports - View reports")
-    print("/broadcast - Send message to all")
-    print("/exportdata - Export data")
-    print("=" * 70)
-    print("🌐 WEB ENDPOINTS:")
-    print(f"GET  / - Dashboard")
-    print(f"GET  /health/hunter - Health check")
-    print(f"GET  /stats/hunter - Statistics")
-    print(f"GET  /users/hunter - User data")
-    print(f"POST /webhook - Telegram webhook")
-    print(f"GET  /status - Bot status")
-    print("=" * 70)
-    print("📱 BOT COMMANDS:")
-    print("/start - Welcome message")
-    print("/swap - Start face swap")
-    print("/mystats - Your statistics")
-    print("/favorites - Saved swaps")
-    print("/history - Swap history")
-    print("/report - Report content")
-    print("/cancel - Cancel swap")
-    print("=" * 70)
-    print("Created by @PokiePy")
+    print("✨ FIXES IN THIS VERSION:")
+    print("• Fixed state management bug")
+    print("• Proper photo download handling")
+    print("• Better error messages")
+    print("• Threaded processing")
+    print("• API call improvements")
     print("=" * 70)
     
     # Initialize database
     init_database()
     
-    # Try to get bot info
+    # Get bot info
     try:
         bot_info = bot.get_me()
         print(f"✅ Bot connected: @{bot_info.username} (ID: {bot_info.id})")
@@ -2421,23 +1410,14 @@ def main():
         print(f"❌ Bot connection error: {e}")
         return
     
-    # Setup based on mode
-    if WEBHOOK_URL:
-        print(f"🌐 Webhook mode enabled")
-        
-        # Setup webhook
-        if setup_webhook():
-            print("✅ Webhook configured successfully")
-            
-            # Start Flask in main thread
-            print(f"🚀 Starting web server on port {BOT_PORT}...")
-            run_flask()
-        else:
-            print("❌ Webhook setup failed, falling back to polling...")
-            run_bot()
+    # Setup webhook
+    print(f"🌐 Setting up webhook...")
+    if setup_webhook():
+        print("✅ Webhook configured successfully")
+        print(f"🚀 Starting web server on port {BOT_PORT}...")
+        run_flask()
     else:
-        print("📡 Polling mode enabled")
-        run_bot()
+        print("❌ Webhook setup failed!")
 
 if __name__ == '__main__':
     try:
