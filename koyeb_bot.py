@@ -28,7 +28,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 # ========== CONFIGURATION ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c')
 BOT_PORT = int(os.environ.get('PORT', 8000))
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://encouraging-di-1carnage1-6226074c.koyeb.app')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://informal-sandie-1carnage1-fb1959f9.koyeb.app/')
 WEBHOOK_PATH = '/webhook'
 
 # ========== ADMIN CONFIG ==========
