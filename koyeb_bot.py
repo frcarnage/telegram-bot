@@ -16,7 +16,7 @@ import sys
 import hashlib
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8522048948:AAGSCayCSZZF_6z2nHcGjVC7B64E3C9u6F8"
+BOT_TOKEN = "7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c"
 BOT_PORT = int(os.environ.get('PORT', 6001))
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
 
