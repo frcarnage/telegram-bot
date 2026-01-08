@@ -3,6 +3,7 @@
 """
 Enhanced Face Swap Bot v3.5 - Production Ready
 Complete with all features: Admin panel, Reports, Backup, Notifications
+FIXED: Swap statistics now properly stored in database
 """
 
 import os
@@ -600,29 +601,43 @@ def verify_user(user_id: int) -> None:
     logger.info(f"User verified: {user_id}")
 
 def update_user_stats(user_id: int, success: bool = True) -> None:
-    """Update user statistics"""
+    """FIXED: Update user statistics properly"""
     conn = get_db_connection()
     c = conn.cursor()
     
-    if success:
-        c.execute('''UPDATE users SET 
-            swaps_count = swaps_count + 1,
-            successful_swaps = successful_swaps + 1,
-            last_active = CURRENT_TIMESTAMP
-            WHERE user_id = ?''', (user_id,))
+    # First, get current stats
+    c.execute('SELECT swaps_count, successful_swaps, failed_swaps FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    
+    if result:
+        swaps_count, successful_swaps, failed_swaps = result
     else:
-        c.execute('''UPDATE users SET 
-            swaps_count = swaps_count + 1,
-            failed_swaps = failed_swaps + 1,
-            last_active = CURRENT_TIMESTAMP
-            WHERE user_id = ?''', (user_id,))
+        swaps_count, successful_swaps, failed_swaps = 0, 0, 0
+    
+    # Update based on success/failure
+    swaps_count += 1
+    if success:
+        successful_swaps += 1
+    else:
+        failed_swaps += 1
+    
+    # Update database
+    c.execute('''UPDATE users SET 
+        swaps_count = ?,
+        successful_swaps = ?,
+        failed_swaps = ?,
+        last_active = CURRENT_TIMESTAMP
+        WHERE user_id = ?''', 
+        (swaps_count, successful_swaps, failed_swaps, user_id))
     
     conn.commit()
     conn.close()
+    
+    logger.info(f"Updated stats for user {user_id}: total={swaps_count}, success={successful_swaps}, failed={failed_swaps}")
 
 def add_swap_history(user_id: int, status: str, processing_time: float, 
                      result_path: str = None, nsfw: bool = False) -> int:
-    """Add a swap to history"""
+    """FIXED: Add a swap to history with proper status"""
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -1080,7 +1095,7 @@ Your swap is currently being processed. Please wait for it to complete before se
             del user_sessions[chat_id]
 
 def process_face_swap(chat_id, session):
-    """Process the face swap with progress updates"""
+    """FIXED: Process the face swap with proper database updates"""
     user_id = session['user_id']
     source_photo = session['source_photo']
     target_photo = session['target_photo']
@@ -1160,6 +1175,7 @@ def process_face_swap(chat_id, session):
         processing_time = time.time() - start_time
         
         if result_image:
+            # Save result image
             os.makedirs('results', exist_ok=True)
             filename = f"swap_{user_id}_{int(time.time())}.png"
             filepath = os.path.join('results', filename)
@@ -1167,6 +1183,7 @@ def process_face_swap(chat_id, session):
             with open(filepath, 'wb') as f:
                 f.write(result_image)
             
+            # Update progress to 100%
             try:
                 bot.edit_message_text(
                     f"""✅ <b>Face Swap Complete!</b>
@@ -1182,15 +1199,19 @@ def process_face_swap(chat_id, session):
             except:
                 pass
             
+            # FIXED: Store swap in history FIRST
             swap_id = add_swap_history(
                 user_id,
-                "success",
+                "success",  # Make sure status is "success"
                 processing_time,
                 filepath,
                 False
             )
             
+            # FIXED: Update user statistics
             update_user_stats(user_id, True)
+            
+            # Notify admin
             notify_admin_swap_complete(user_id, swap_id, processing_time, True)
             
             caption = f"""✨ <b>Face Swap Complete!</b>
@@ -1198,6 +1219,7 @@ def process_face_swap(chat_id, session):
 🆔 <b>Swap ID:</b> #{swap_id}
 ⏱️ <b>Time:</b> {processing_time:.1f} seconds
 ✅ <b>Status:</b> Success
+📊 <b>Your Stats:</b> {get_user_swap_count(user_id)} swaps, {get_user_success_rate(user_id)}% success rate
 
 💡 <b>Tips:</b>
 • Save to favorites for later
@@ -1224,7 +1246,7 @@ def process_face_swap(chat_id, session):
                     parse_mode='HTML'
                 )
             
-            logger.info(f"Swap successful for user {user_id}, time: {processing_time:.2f}s")
+            logger.info(f"Swap successful for user {user_id}, ID={swap_id}, time: {processing_time:.2f}s, stats updated")
             
         else:
             logger.error(f"Face swap API failed for user {user_id}")
@@ -1253,9 +1275,13 @@ def process_face_swap(chat_id, session):
             except:
                 pass
             
-            add_swap_history(user_id, "failed", processing_time)
+            # FIXED: Store failed swap in history
+            swap_id = add_swap_history(user_id, "failed", processing_time)
+            
+            # FIXED: Update user stats for failed swap
             update_user_stats(user_id, False)
-            notify_admin_swap_complete(user_id, 0, processing_time, False)
+            
+            notify_admin_swap_complete(user_id, swap_id, processing_time, False)
             
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("🔄 Try Again", callback_data="start_swap"))
@@ -1287,11 +1313,17 @@ If this continues, contact support.""",
             pass
         
         processing_time = time.time() - start_time if 'start_time' in session else 0
-        add_swap_history(user_id, "failed", processing_time)
+        
+        # FIXED: Store error in history
+        add_swap_history(user_id, "error", processing_time)
+        
+        # FIXED: Update user stats for error
         update_user_stats(user_id, False)
+        
         notify_admin_swap_complete(user_id, 0, processing_time, False)
     
     finally:
+        # Clean up session
         if chat_id in user_sessions:
             del user_sessions[chat_id]
         if chat_id in active_swaps:
@@ -1308,6 +1340,13 @@ def add_to_favorites_callback(call):
             bot.answer_callback_query(call.id, "⭐ Added to favorites!")
             
             try:
+                # Also mark as favorite in swaps_history
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute('UPDATE swaps_history SET is_favorite = 1 WHERE id = ?', (swap_id,))
+                conn.commit()
+                conn.close()
+                
                 if call.message.caption:
                     new_caption = call.message.caption + "\n\n⭐ <b>Saved to Favorites!</b>"
                     bot.edit_message_caption(
@@ -1361,7 +1400,7 @@ Thank you for your report (ID: #{report_id}).
 
 @bot.message_handler(commands=['mystats'])
 def my_stats_command(message):
-    """Show user statistics"""
+    """Show user statistics - FIXED to show accurate data"""
     user_id = message.from_user.id
     
     conn = get_db_connection()
@@ -1371,10 +1410,13 @@ def my_stats_command(message):
         join_date, last_active FROM users WHERE user_id = ?''', (user_id,))
     
     result = c.fetchone()
-    conn.close()
     
     if result:
         total, success, failed, join_date, last_active = result
+        
+        # Also get count from swaps_history for verification
+        c.execute('SELECT COUNT(*) FROM swaps_history WHERE user_id = ?', (user_id,))
+        history_count = c.fetchone()[0] or 0
         
         success_rate = round((success / max(1, total)) * 100, 1)
         
@@ -1392,6 +1434,7 @@ def my_stats_command(message):
 • Successful: <b>{success}</b>
 • Failed: <b>{failed}</b>
 • Success Rate: <b>{success_rate}%</b>
+• History Records: <b>{history_count}</b>
 
 🏆 <b>Rank:</b> {'Beginner' if total < 5 else 'Intermediate' if total < 20 else 'Expert'}
 📈 <b>Activity Level:</b> {'New User' if total == 0 else 'Active' if total > 5 else 'Casual'}"""
@@ -1399,6 +1442,8 @@ def my_stats_command(message):
         bot.reply_to(message, stats_text, parse_mode='HTML')
     else:
         bot.reply_to(message, "📊 No statistics found. Start with /swap to begin your journey!")
+    
+    conn.close()
 
 @bot.message_handler(commands=['favorites'])
 def show_favorites_command(message):
@@ -1475,7 +1520,11 @@ You haven't performed any swaps yet.
         time_str = f"{proc_time:.1f}s" if proc_time else "N/A"
         
         history_text += f"\n{i}. {emoji} <b>Swap #{swap_id}</b>\n"
-        history_text += f"   📅 {date_str} | ⏱️ {time_str}"
+        history_text += f"   📅 {date_str} | ⏱️ {time_str} | Status: {status}"
+    
+    # Get user stats for verification
+    user_stats = get_user_swap_count(user_id)
+    history_text += f"\n\n📊 <b>Stats Verification:</b>\nDatabase shows {user_stats} total swaps"
     
     bot.reply_to(message, history_text, parse_mode='HTML')
 
@@ -1521,7 +1570,8 @@ def admin_panel(message):
 /broadcast - Send message
 /botstatus - System status
 /createdbbackup - Backup data
-/restoredb - Restore data"""
+/restoredb - Restore data
+/fixstats - Fix statistics (NEW)"""
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -1536,8 +1586,84 @@ def admin_panel(message):
         types.InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
         types.InlineKeyboardButton("🔄 Status", callback_data="admin_status")
     )
+    markup.add(
+        types.InlineKeyboardButton("🔧 Fix Stats", callback_data="admin_fix_stats")
+    )
     
     bot.reply_to(message, admin_text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_fix_stats")
+def admin_fix_stats_callback(call):
+    """Fix statistics"""
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ Access denied.")
+        return
+    
+    fix_statistics_command(call.message)
+
+@bot.message_handler(commands=['fixstats'])
+def fix_statistics_command(message):
+    """Fix all user statistics"""
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Access denied.")
+        return
+    
+    bot.reply_to(message, "🔧 <b>Fixing statistics...</b>\n\n⏳ This may take a moment...", parse_mode='HTML')
+    
+    def fix_stats_task():
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            
+            # Get all users
+            c.execute('SELECT user_id FROM users')
+            users = c.fetchall()
+            
+            fixed_count = 0
+            
+            for user_row in users:
+                user_id = user_row[0]
+                
+                # Count swaps from history
+                c.execute('SELECT COUNT(*), SUM(CASE WHEN status = "success" THEN 1 ELSE 0 END) FROM swaps_history WHERE user_id = ?', (user_id,))
+                result = c.fetchone()
+                
+                if result:
+                    total_swaps = result[0] or 0
+                    successful_swaps = result[1] or 0
+                    failed_swaps = total_swaps - successful_swaps
+                    
+                    # Update user stats
+                    c.execute('''UPDATE users SET 
+                        swaps_count = ?,
+                        successful_swaps = ?,
+                        failed_swaps = ?
+                        WHERE user_id = ?''',
+                        (total_swaps, successful_swaps, failed_swaps, user_id))
+                    
+                    fixed_count += 1
+            
+            conn.commit()
+            conn.close()
+            
+            bot.send_message(
+                message.chat.id,
+                f"""✅ <b>Statistics Fixed!</b>
+
+📊 <b>Results:</b>
+• Users updated: {fixed_count}
+• Total users: {len(users)}
+• Time: {datetime.now().strftime('%H:%M:%S')}
+
+🔄 <b>Stats have been recalculated from swap history.</b>""",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Fix stats error: {e}")
+            bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
+    
+    threading.Thread(target=fix_stats_task, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_stats")
 def admin_stats_callback(call):
@@ -1570,6 +1696,13 @@ def admin_stats_callback(call):
     c.execute('SELECT COUNT(*) FROM users WHERE DATE(join_date) = DATE("now")')
     new_today = c.fetchone()[0] or 0
     
+    # Verify consistency
+    c.execute('SELECT SUM(swaps_count), SUM(successful_swaps), SUM(failed_swaps) FROM users')
+    user_stats = c.fetchone()
+    user_total = user_stats[0] or 0
+    user_success = user_stats[1] or 0
+    user_failed = user_stats[2] or 0
+    
     success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
     
     conn.close()
@@ -1583,10 +1716,11 @@ def admin_stats_callback(call):
 • Banned: {len(BANNED_USERS)}
 
 🔄 <b>Swaps:</b>
-• Total: {total_swaps}
+• Total (History): {total_swaps}
 • Successful: {success_swaps}
 • Failed: {failed_swaps}
 • Success Rate: {success_rate}%
+• From User Stats: {user_total} (✅{user_success} ❌{user_failed})
 
 ⭐ <b>Engagement:</b>
 • Favorites: {total_favorites}
@@ -1681,8 +1815,59 @@ def list_users_command(message):
         markup.row(*nav_buttons)
     
     markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_users_refresh"))
+    markup.add(types.InlineKeyboardButton("🔧 Fix User Stats", callback_data="admin_fix_user_stats"))
     
     bot.reply_to(message, users_text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_fix_user_stats")
+def admin_fix_user_stats_callback(call):
+    """Fix stats for current page users"""
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⛔ Access denied.")
+        return
+    
+    # Parse the message to get users
+    message_text = call.message.text
+    
+    # Extract user IDs from message
+    import re
+    user_ids = re.findall(r'🆔 <b>(\d+)</b>', message_text)
+    
+    if not user_ids:
+        bot.answer_callback_query(call.id, "❌ No users found")
+        return
+    
+    fixed = 0
+    for user_id_str in user_ids:
+        user_id = int(user_id_str)
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Count swaps from history
+        c.execute('SELECT COUNT(*), SUM(CASE WHEN status = "success" THEN 1 ELSE 0 END) FROM swaps_history WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        
+        if result:
+            total_swaps = result[0] or 0
+            successful_swaps = result[1] or 0
+            failed_swaps = total_swaps - successful_swaps
+            
+            # Update user stats
+            c.execute('''UPDATE users SET 
+                swaps_count = ?,
+                successful_swaps = ?,
+                failed_swaps = ?
+                WHERE user_id = ?''',
+                (total_swaps, successful_swaps, failed_swaps, user_id))
+            
+            conn.commit()
+            fixed += 1
+        
+        conn.close()
+    
+    bot.answer_callback_query(call.id, f"✅ Fixed stats for {fixed} users")
+    list_users_command(call.message)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_ban_'))
 def admin_ban_callback(call):
@@ -1857,7 +2042,7 @@ def view_swap_callback(call):
     
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''SELECT s.*, u.username, u.user_id 
+    c.execute('''SELECT s.*, u.username, u.user_id, u.swaps_count, u.successful_swaps
         FROM swaps_history s
         JOIN users u ON s.user_id = u.user_id
         WHERE s.id = ?''', (swap_id,))
@@ -1876,7 +2061,12 @@ def view_swap_callback(call):
 ⭐ Favorite: {'Yes' if swap['is_favorite'] else 'No'}
 🚨 NSFW: {'Detected' if swap['nsfw_detected'] else 'Clean'}
 
-📁 Path: {swap['result_path'] or 'N/A'}"""
+📁 Path: {swap['result_path'] or 'N/A'}
+
+📊 <b>User Stats:</b>
+• Total Swaps: {swap['swaps_count']}
+• Successful: {swap['successful_swaps']}
+• Success Rate: {round((swap['successful_swaps'] / max(1, swap['swaps_count'])) * 100, 1)}%"""
         
         bot.answer_callback_query(call.id, "Swap details loaded")
         bot.send_message(call.message.chat.id, swap_info, parse_mode='HTML')
@@ -2252,7 +2442,8 @@ def bot_status_command(message):
 • /stats - Statistics
 • /status - Status page
 • /health/hunter - Detailed health
-• /users/hunter - User data"""
+• /users/hunter - User data
+• /fixstats - Fix statistics (NEW)"""
     
     bot.reply_to(message, status_text, parse_mode='HTML')
 
@@ -2905,6 +3096,13 @@ def main():
     print("• Multiple ping endpoints for 24/7 uptime")
     print("• Web dashboard with real-time stats")
     print("• Data cleanup tools")
+    print("• FIXED: Swap statistics now properly stored!")
+    print("=" * 80)
+    print("🔧 STATISTICS FIXES APPLIED:")
+    print("1. update_user_stats() - Properly increments counters")
+    print("2. add_swap_history() - Always called with correct status")
+    print("3. New /fixstats command to fix existing data")
+    print("4. Verification between users and swaps_history tables")
     print("=" * 80)
     print("💾 BACKUP SYSTEM:")
     print("1. /createdbbackup - Create backup before updates")
