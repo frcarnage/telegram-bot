@@ -1,61 +1,71 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced Face Swap Bot v3.5 - Production Ready
-Complete with all features: Admin panel, Reports, Backup, Notifications
-FIXED: Swap statistics now properly stored in database
+Telegram Rain Selfbot v2.0 - Production Ready
+Complete with group management, inline button clicking, and monitoring
+Optimized for Koyeb deployment
 """
 
 import os
 import sys
-import time
+import re
 import json
-import sqlite3
-import base64
-import hashlib
+import time
 import logging
-import threading
-import csv
-import io
-import shutil
-import zipfile
-import tempfile
+import asyncio
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Optional, Set, Tuple, Any
 
-import requests
-import telebot
-from telebot import types
-from flask import Flask, jsonify, request, render_template_string, send_file
+import aiohttp
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.tl import types
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.types import ReactionEmoji
+from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '7863008338:AAGoOdY4xpl0ATf0GRwQfCTg_Dt9ny5AM2c')
-BOT_PORT = int(os.environ.get('PORT', 8000))
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://informal-sandie-1carnage1-fb1959f9.koyeb.app')
-WEBHOOK_PATH = '/webhook'
+SESSION_STRING = os.environ.get('TELEGRAM_SESSION_STRING', '1BVtsOIwBu77iLjtJS9sDpHTirCAB2EuPrb7fWA6B6M1KoRPY3fdSqDyq2A5qODauYg-qhkP7UTMK1-logKBmD7LmqMO04ZKm2G8_PwLSlLX6z6oa6ah3b8J5Q5Mo5d_h0QOg-HwWIF2O29jgd_6noOQ9pv-4SGEkXWKy45q2HxFhJz1ZESmhntAAyyN2syrFU_ci7IQgQ2G59657iuU6sSXyXlttWvRPMqAknIVIbHDOrmLwha4AD2Z1P84ymdB312MtFtF7_wA2jxr3PL2Jw5dEBq2AxWoHl5ByEc5CMxUbvxJ1c0gcO26hRl7evZwAiL-br1VtbZBDOwmx4oEcHLZNyRUdsxs=')
+ALERT_CHANNEL = os.environ.get('ALERT_CHANNEL', 'me')  # "me" for Saved Messages
+ADMIN_ID = int(os.environ.get('ADMIN_ID', 8472371058))
 
-# ========== ADMIN CONFIG ==========
-ADMIN_ID = 7575087826
-BANNED_USERS = set()
+# Bot settings
+WEB_PORT = int(os.environ.get('PORT', 8080))
 
-# ========== CHANNEL VERIFICATION ==========
-REQUIRED_CHANNEL = "@botupdates_2"
+# Keywords for detection
+KEYWORDS = [
+    "rain", "airdrop", "giveaway", "claim", "free", "distribution",
+    "drop", "contest", "reward", "prize", "raffle", "lottery",
+    "win", "participate", "bot", "crypto", "token", "nft",
+    "💰", "🎁", "🎉", "🚀", "🔥", "✨", "🪙", "🆓", "🏆"
+]
 
-# ========== FACE SWAP CONFIG ==========
-FACE_SWAP_API_TOKEN = "0.ufDEMbVMT7mc9_XLsFDSK5CQqdj9Cx_Zjww0DevIvXN5M4fXQr3B9YtPdGkKAHjXBK6UC9rFcEbZbzCfkxxgmdTYV8iPzTby0C03dTKv5V9uXFYfwIVlqwNbIsfOK_rLRHIPB31bQ0ijSTEd-lLbllf3MkEcpkEZFFmmq8HMAuRuliCXFEdCwEB1HoYSJtvJEmDIVsooU3gYdrCm5yOJ8_lZ4DiHCSvy7P8-YxwJKkapJNCMUCFIfJbWDkDzvh8DGPyTRoHbURX8kClfImmPrGcqlfd7kkoNRcudS25IbNf1CGBsh8V96MtEhnTZvOpZfnp5dpV7MfgwOgvx7hUazUaC_wxQE63Aa0uOPuGvJ70BNrmeZIIrY9roD1Koj316L4g2BZ_LLZZF11wcrNNon8UXB0iVudiNCJyDQCxLUmblXUpt4IUvRoiOqXBNtWtLqY0su0ieVB0jjyDf_-zs7wc8WQ_jqp-NsTxgKOgvZYWV6Elz_lf4cNxGHZJ5BdcyLEoRBH3cksvwoncmYOy5Ulco22QT-x2z06xVFBZYZMVulxAcmvQemKfSFKsNaDxwor35p-amn9Vevhyb-GzA_oIoaTmc0fVXSshax2rdFQHQms86fZ_jkTieRpyIuX0mI3C5jLGIiOXzWxNgax9eZeQstYjIh8BIdMiTIUHfyKVTgtoLbK0hjTUTP0xDlCLnOt5qHdwe_iTWedBsswAJWYdtIxw0YUfIU22GMYrJoekOrQErawNlU5yT-LhXquBQY3EBtEup4JMWLendSh68d6HqjN2T3sAfVw0nY5jg7_5LJwj5gqEk57devNN8GGhogJpfdGzYoNGja22IZIuDnPPmWTpGx4VcLOLknSHrzio.tXUN6eooS69z3QtBp-DY1g.d882822dfe05be2b36ed1950554e1bac753abfe304a289adc4289b3f0d517356"
-FACE_SWAP_API_URL = "https://api.deepswapper.com/swap"
+# Button text patterns to click
+CLICKABLE_BUTTON_TEXTS = [
+    "join", "participate", "claim", "tap", "click", "start",
+    "enter", "submit", "verify", "connect", "open", "go",
+    "get", "receive", "collect", "airdrop", "reward", "check",
+    "🎯", "✅", "🔗", "📲", "🎰", "👆", "👉", "👇", "🎮"
+]
 
-# ========== APPLICATION STATES ==========
-STATE_IDLE = 0
-STATE_WAITING_SOURCE = 1
-STATE_WAITING_TARGET = 2
-STATE_PROCESSING = 3
+# Auto settings
+AUTO_CLICK_BUTTONS = True
+AUTO_JOIN_LINKS = True
+SEND_REACTIONS = True
+REACTION_EMOJI = "👀"
+
+# Cooldowns (seconds)
+CHAT_COOLDOWN = 2
+BUTTON_COOLDOWN = 1
+USER_COOLDOWN = 1
 
 # ========== INITIALIZE ==========
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
 # ========== LOGGING ==========
 logging.basicConfig(
@@ -63,2519 +73,996 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('bot.log', encoding='utf-8')
+        logging.FileHandler('rain_bot.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
 
-# ========== GLOBAL TRACKING ==========
-user_sessions: Dict[int, Dict] = {}
-active_swaps: Dict[int, Dict] = {}
-backup_restore_data: Dict[int, Dict] = {}
-
-# ========== DATABASE FUNCTIONS ==========
-def init_database() -> None:
-    """Initialize SQLite database with all required tables"""
-    conn = sqlite3.connect('face_swap_bot.db', check_same_thread=False)
-    c = conn.cursor()
+# ========== DATABASE ==========
+class Database:
+    def __init__(self, db_path='rain_bot.db'):
+        self.db_path = db_path
+        self.init_database()
     
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_active TIMESTAMP,
-        is_banned INTEGER DEFAULT 0,
-        verified INTEGER DEFAULT 0,
-        swaps_count INTEGER DEFAULT 0,
-        successful_swaps INTEGER DEFAULT 0,
-        failed_swaps INTEGER DEFAULT 0,
-        data_hash TEXT,
-        notified_admin BOOLEAN DEFAULT 0
-    )''')
-    
-    # Swaps history table
-    c.execute('''CREATE TABLE IF NOT EXISTS swaps_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        swap_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        status TEXT,
-        processing_time REAL,
-        result_path TEXT,
-        is_favorite INTEGER DEFAULT 0,
-        is_reviewed INTEGER DEFAULT 0,
-        nsfw_detected INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
-    )''')
-    
-    # Reports table
-    c.execute('''CREATE TABLE IF NOT EXISTS reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        reporter_id INTEGER,
-        reported_swap_id INTEGER,
-        reason TEXT,
-        report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'pending',
-        admin_notes TEXT,
-        FOREIGN KEY (reporter_id) REFERENCES users (user_id),
-        FOREIGN KEY (reported_swap_id) REFERENCES swaps_history (id)
-    )''')
-    
-    # Favorites table
-    c.execute('''CREATE TABLE IF NOT EXISTS favorites (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        swap_id INTEGER,
-        saved_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (user_id),
-        FOREIGN KEY (swap_id) REFERENCES swaps_history (id)
-    )''')
-    
-    # Backup metadata table
-    c.execute('''CREATE TABLE IF NOT EXISTS backup_metadata (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        backup_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        backup_size INTEGER,
-        users_count INTEGER,
-        swaps_count INTEGER,
-        filename TEXT,
-        admin_id INTEGER
-    )''')
-    
-    # Admin notifications table
-    c.execute('''CREATE TABLE IF NOT EXISTS admin_notifications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        notification_type TEXT,
-        user_id INTEGER,
-        swap_id INTEGER,
-        report_id INTEGER,
-        notification_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_read INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )''')
-    
-    # Load banned users
-    c.execute('SELECT user_id FROM users WHERE is_banned = 1')
-    for row in c.fetchall():
-        BANNED_USERS.add(row[0])
-    
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized successfully")
-
-def get_db_connection() -> sqlite3.Connection:
-    """Get database connection with proper settings"""
-    conn = sqlite3.connect('face_swap_bot.db', check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# ========== NOTIFICATION FUNCTIONS ==========
-def notify_admin_new_user(user_id: int, username: str, first_name: str, last_name: str):
-    """Notify admin about new user"""
-    try:
-        msg = f"""🎉 <b>NEW USER REGISTERED</b>
-
-🆔 ID: <code>{user_id}</code>
-👤 Username: @{username or 'N/A'}
-📛 Name: {first_name} {last_name or ''}
-📊 Total Users: {get_total_users()}
-🕒 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📈 <b>Quick Stats:</b>
-• Active (24h): {get_active_users_count(1)}
-• Total Swaps: {get_total_swaps()}
-• Success Rate: {get_success_rate()}%"""
-        
-        bot.send_message(ADMIN_ID, msg, parse_mode='HTML')
-        
-        # Mark as notified
-        conn = get_db_connection()
+    def init_database(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         c = conn.cursor()
-        c.execute('UPDATE users SET notified_admin = 1 WHERE user_id = ?', (user_id,))
+        
+        # Monitored groups
+        c.execute('''CREATE TABLE IF NOT EXISTS monitored_groups (
+            id INTEGER PRIMARY KEY,
+            group_id INTEGER UNIQUE,
+            group_title TEXT,
+            group_username TEXT,
+            added_by TEXT,
+            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1
+        )''')
+        
+        # Processed messages
+        c.execute('''CREATE TABLE IF NOT EXISTS processed_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            message_id INTEGER,
+            processed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, message_id)
+        )''')
+        
+        # Statistics
+        c.execute('''CREATE TABLE IF NOT EXISTS statistics (
+            id INTEGER PRIMARY KEY,
+            rains_detected INTEGER DEFAULT 0,
+            buttons_clicked INTEGER DEFAULT 0,
+            links_joined INTEGER DEFAULT 0,
+            errors INTEGER DEFAULT 0,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Initialize stats
+        c.execute('INSERT OR IGNORE INTO statistics (id) VALUES (1)')
+        
+        # Cooldown tracking
+        c.execute('''CREATE TABLE IF NOT EXISTS cooldown_tracker (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT UNIQUE,
+            last_action TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
         conn.commit()
         conn.close()
-        
-    except Exception as e:
-        logger.error(f"Failed to notify admin: {e}")
-
-def notify_admin_report(report_id: int, reporter_id: int, swap_id: int, reason: str):
-    """Notify admin about new report"""
-    try:
-        msg = f"""🚨 <b>NEW REPORT</b>
-
-🆔 Report ID: #{report_id}
-👤 Reporter: {reporter_id}
-🔄 Swap ID: #{swap_id}
-📝 Reason: {reason[:200]}
-🕒 Time: {datetime.now().strftime('%H:%M:%S')}
-
-⚠️ <b>Action Required:</b> Use /reports to review"""
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📋 View Reports", callback_data="admin_reports"))
-        markup.add(types.InlineKeyboardButton("👁️ View Swap", callback_data=f"view_swap_{swap_id}"))
-        
-        bot.send_message(ADMIN_ID, msg, parse_mode='HTML', reply_markup=markup)
-        
-    except Exception as e:
-        logger.error(f"Failed to notify admin about report: {e}")
-
-def notify_admin_swap_complete(user_id: int, swap_id: int, processing_time: float, success: bool = True):
-    """Notify admin about completed swap"""
-    try:
-        status = "✅ SUCCESS" if success else "❌ FAILED"
-        msg = f"""🔄 <b>SWAP COMPLETED</b>
-
-👤 User: {user_id}
-🆔 Swap ID: #{swap_id}
-⏱️ Time: {processing_time:.1f}s
-📊 Status: {status}
-🕒 Time: {datetime.now().strftime('%H:%M:%S')}
-
-📈 <b>User Stats:</b>
-• Total Swaps: {get_user_swap_count(user_id)}
-• Success Rate: {get_user_success_rate(user_id)}%"""
-        
-        bot.send_message(ADMIN_ID, msg, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Failed to notify admin about swap: {e}")
-
-# ========== STATISTICS FUNCTIONS ==========
-def get_total_users() -> int:
-    """Get total number of registered users"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM users')
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def get_active_users_count(days: int = 1) -> int:
-    """Get number of active users in last N days"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(f"SELECT COUNT(*) FROM users WHERE last_active >= datetime('now', '-{days} days')")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def get_total_swaps() -> int:
-    """Get total number of swaps"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM swaps_history')
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def get_success_rate() -> float:
-    """Get overall success rate"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-    success = c.fetchone()[0] or 0
-    c.execute('SELECT COUNT(*) FROM swaps_history')
-    total = c.fetchone()[0] or 1
-    conn.close()
-    return round((success / total) * 100, 1)
-
-def get_user_swap_count(user_id: int) -> int:
-    """Get user's total swap count"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT swaps_count FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else 0
-
-def get_user_success_rate(user_id: int) -> float:
-    """Get user's success rate"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT successful_swaps, swaps_count FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
     
-    if result and result[1] > 0:
-        return round((result[0] / result[1]) * 100, 1)
-    return 0.0
-
-# ========== BACKUP & RESTORE FUNCTIONS ==========
-def create_database_backup() -> Optional[bytes]:
-    """Create a complete database backup"""
-    try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            backup_file = os.path.join(temp_dir, 'backup.json')
-            
-            conn = get_db_connection()
-            conn.row_factory = sqlite3.Row
-            
-            backup_data = {
-                'timestamp': datetime.now().isoformat(),
-                'version': '3.5',
-                'tables': {}
-            }
-            
-            tables = ['users', 'swaps_history', 'reports', 'favorites']
-            
-            for table in tables:
-                cursor = conn.execute(f'SELECT * FROM {table}')
-                rows = cursor.fetchall()
-                
-                table_data = []
-                for row in rows:
-                    table_data.append(dict(row))
-                
-                backup_data['tables'][table] = table_data
-            
+    def get_connection(self):
+        """Get database connection"""
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def add_group(self, group_id: int, title: str, username: str = None, added_by: str = "admin") -> bool:
+        """Add a group to monitoring list"""
+        try:
+            conn = self.get_connection()
+            c = conn.cursor()
+            c.execute('''INSERT OR REPLACE INTO monitored_groups 
+                (group_id, group_title, group_username, added_by, is_active)
+                VALUES (?, ?, ?, ?, 1)''',
+                (group_id, title, username, added_by))
+            conn.commit()
             conn.close()
-            
-            with open(backup_file, 'w', encoding='utf-8') as f:
-                json.dump(backup_data, f, ensure_ascii=False, indent=2)
-            
-            with open(backup_file, 'rb') as f:
-                backup_bytes = f.read()
-            
-            # Create ZIP
-            zip_file = os.path.join(temp_dir, 'backup.zip')
-            with zipfile.ZipFile(zip_file, 'w') as zipf:
-                zipf.write(backup_file, 'backup.json')
-            
-            with open(zip_file, 'rb') as f:
-                zip_bytes = f.read()
-            
-            logger.info(f"Backup created: {len(zip_bytes)} bytes")
-            return zip_bytes
-            
-    except Exception as e:
-        logger.error(f"Backup creation failed: {e}")
-        return None
-
-def restore_database_from_backup(backup_data: bytes) -> Tuple[bool, str]:
-    """Restore database from backup"""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_file:
-            tmp_file.write(backup_data)
-            tmp_path = tmp_file.name
+            return True
+        except Exception as e:
+            logger.error(f"Error adding group: {e}")
+            return False
+    
+    def remove_group(self, group_id: int) -> bool:
+        """Remove a group from monitoring"""
+        try:
+            conn = self.get_connection()
+            c = conn.cursor()
+            c.execute('DELETE FROM monitored_groups WHERE group_id = ?', (group_id,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Error removing group: {e}")
+            return False
+    
+    def get_monitored_groups(self) -> List[Dict]:
+        """Get all monitored groups"""
+        conn = self.get_connection()
+        c = conn.cursor()
+        c.execute('''SELECT group_id, group_title, group_username, added_date 
+            FROM monitored_groups WHERE is_active = 1 ORDER BY added_date''')
         
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with zipfile.ZipFile(tmp_path, 'r') as zipf:
-                zipf.extractall(temp_dir)
-            
-            json_backup = os.path.join(temp_dir, 'backup.json')
-            
-            if os.path.exists(json_backup):
-                with open(json_backup, 'r', encoding='utf-8') as f:
-                    backup_data = json.load(f)
-                
-                # Create temporary database
-                temp_db = 'face_swap_bot_temp.db'
-                if os.path.exists(temp_db):
-                    os.remove(temp_db)
-                
-                conn = sqlite3.connect(temp_db)
-                c = conn.cursor()
-                
-                # Recreate schema
-                c.execute('''CREATE TABLE users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    join_date TIMESTAMP,
-                    last_active TIMESTAMP,
-                    is_banned INTEGER DEFAULT 0,
-                    verified INTEGER DEFAULT 0,
-                    swaps_count INTEGER DEFAULT 0,
-                    successful_swaps INTEGER DEFAULT 0,
-                    failed_swaps INTEGER DEFAULT 0,
-                    data_hash TEXT,
-                    notified_admin BOOLEAN DEFAULT 0
-                )''')
-                
-                c.execute('''CREATE TABLE swaps_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    swap_date TIMESTAMP,
-                    status TEXT,
-                    processing_time REAL,
-                    result_path TEXT,
-                    is_favorite INTEGER DEFAULT 0,
-                    is_reviewed INTEGER DEFAULT 0,
-                    nsfw_detected INTEGER DEFAULT 0
-                )''')
-                
-                c.execute('''CREATE TABLE reports (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    reporter_id INTEGER,
-                    reported_swap_id INTEGER,
-                    reason TEXT,
-                    report_date TIMESTAMP,
-                    status TEXT DEFAULT 'pending',
-                    admin_notes TEXT
-                )''')
-                
-                c.execute('''CREATE TABLE favorites (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    swap_id INTEGER,
-                    saved_date TIMESTAMP
-                )''')
-                
-                # Restore data
-                for table_name, rows in backup_data['tables'].items():
-                    if not rows:
-                        continue
-                    
-                    first_row = rows[0]
-                    columns = ', '.join(first_row.keys())
-                    placeholders = ', '.join(['?'] * len(first_row))
-                    
-                    for row in rows:
-                        values = [row[col] for col in first_row.keys()]
-                        c.execute(f'INSERT INTO {table_name} ({columns}) VALUES ({placeholders})', values)
-                
-                conn.commit()
-                conn.close()
-                
-                # Verify
-                conn = sqlite3.connect(temp_db)
-                c = conn.cursor()
-                
-                tables_to_check = ['users', 'swaps_history', 'reports', 'favorites']
-                counts = {}
-                
-                for table in tables_to_check:
-                    c.execute(f'SELECT COUNT(*) FROM {table}')
-                    counts[table] = c.fetchone()[0]
-                
-                conn.close()
-                
-                # Create backup of current database
-                if os.path.exists('face_swap_bot.db'):
-                    backup_time = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    shutil.copy2('face_swap_bot.db', f'face_swap_bot_backup_{backup_time}.db')
-                
-                # Replace database
-                os.rename(temp_db, 'face_swap_bot.db')
-                
-                message_lines = ["✅ Database restored successfully!"]
-                message_lines.append(f"📊 Restored data:")
-                for table, count in counts.items():
-                    message_lines.append(f"• {table}: {count} records")
-                message_lines.append(f"⏰ Backup timestamp: {backup_data.get('timestamp', 'Unknown')}")
-                message_lines.append(f"🔧 Version: {backup_data.get('version', 'Unknown')}")
-                
-                os.remove(tmp_path)
-                
-                return True, '\n'.join(message_lines)
-            else:
-                return False, "❌ No valid backup file found"
-    
-    except Exception as e:
-        logger.error(f"Restore failed: {e}")
-        return False, f"❌ Restore failed: {str(e)}"
-
-# ========== UTILITY FUNCTIONS ==========
-def generate_progress_bar(percent: int) -> str:
-    """Generate a progress bar string"""
-    filled = int(percent / 10)
-    return "█" * filled + "░" * (10 - filled)
-
-def estimate_time(start_time: float, progress: int) -> str:
-    """Estimate remaining time based on progress"""
-    if progress == 0:
-        return "Calculating..."
-    
-    elapsed = time.time() - start_time
-    total = elapsed / (progress / 100)
-    remaining = total - elapsed
-    
-    if remaining < 60:
-        return f"{int(remaining)}s"
-    elif remaining < 3600:
-        return f"{int(remaining/60)}m {int(remaining%60)}s"
-    else:
-        return f"{int(remaining/3600)}h {int((remaining%3600)/60)}m"
-
-def download_telegram_photo(file_id: str) -> Optional[bytes]:
-    """Download photo from Telegram"""
-    try:
-        file_info = bot.get_file(file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        response = requests.get(file_url, timeout=30)
+        groups = []
+        for row in c.fetchall():
+            groups.append({
+                'id': row[0],
+                'title': row[1],
+                'username': row[2],
+                'added_date': row[3]
+            })
         
-        if response.status_code == 200:
-            return response.content
-        else:
-            logger.error(f"Failed to download photo: {response.status_code}")
-            return None
-    except Exception as e:
-        logger.error(f"Error downloading photo: {e}")
-        return None
-
-# ========== USER MANAGEMENT FUNCTIONS ==========
-def register_user(user_id: int, username: str, first_name: str, last_name: str) -> bool:
-    """Register a new user"""
-    conn = get_db_connection()
-    c = conn.cursor()
+        conn.close()
+        return groups
     
-    c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
-    is_new = c.fetchone() is None
+    def is_group_monitored(self, group_id: int) -> bool:
+        """Check if a group is being monitored"""
+        conn = self.get_connection()
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM monitored_groups WHERE group_id = ? AND is_active = 1', (group_id,))
+        result = c.fetchone() is not None
+        conn.close()
+        return result
     
-    data_hash = hashlib.sha256(f"{user_id}{username}{first_name}{last_name}".encode()).hexdigest()
+    def mark_message_processed(self, chat_id: int, message_id: int):
+        """Mark message as processed"""
+        try:
+            conn = self.get_connection()
+            c = conn.cursor()
+            c.execute('''INSERT OR IGNORE INTO processed_messages (chat_id, message_id)
+                VALUES (?, ?)''', (chat_id, message_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error marking message processed: {e}")
     
-    if is_new:
-        c.execute('''INSERT INTO users 
-            (user_id, username, first_name, last_name, last_active, data_hash, notified_admin)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, 0)''',
-            (user_id, username, first_name, last_name, data_hash))
-    else:
-        c.execute('''UPDATE users SET 
-            username = ?, first_name = ?, last_name = ?, last_active = CURRENT_TIMESTAMP, data_hash = ?
-            WHERE user_id = ?''',
-            (username, first_name, last_name, data_hash, user_id))
+    def is_message_processed(self, chat_id: int, message_id: int) -> bool:
+        """Check if message was already processed"""
+        conn = self.get_connection()
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM processed_messages WHERE chat_id = ? AND message_id = ?', (chat_id, message_id))
+        result = c.fetchone() is not None
+        conn.close()
+        return result
     
-    conn.commit()
-    conn.close()
-    
-    if is_new:
-        notify_admin_new_user(user_id, username, first_name, last_name)
-        logger.info(f"New user registered: {user_id}")
-    
-    return is_new
-
-def ban_user(user_id: int) -> None:
-    """Ban a user"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    BANNED_USERS.add(user_id)
-    logger.info(f"User banned: {user_id}")
-
-def unban_user(user_id: int) -> None:
-    """Unban a user"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    BANNED_USERS.discard(user_id)
-    logger.info(f"User unbanned: {user_id}")
-
-def get_all_users(limit: int = 100, offset: int = 0) -> List[Tuple]:
-    """Get all users with pagination"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''SELECT user_id, username, first_name, last_name, join_date, last_active,
-        is_banned, verified, swaps_count, successful_swaps, failed_swaps 
-        FROM users 
-        ORDER BY join_date DESC 
-        LIMIT ? OFFSET ?''', (limit, offset))
-    users = c.fetchall()
-    conn.close()
-    return users
-
-def check_channel_membership(user_id: int) -> bool:
-    """Check if user is member of required channel"""
-    try:
-        channel_username = REQUIRED_CHANNEL.replace('@', '')
-        member = bot.get_chat_member(f"@{channel_username}", user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Failed to check channel membership: {e}")
-        return False
-
-def verify_user(user_id: int) -> None:
-    """Verify user"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('UPDATE users SET verified = 1 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    logger.info(f"User verified: {user_id}")
-
-def update_user_stats(user_id: int, success: bool = True) -> None:
-    """FIXED: Update user statistics properly"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    # First, get current stats
-    c.execute('SELECT swaps_count, successful_swaps, failed_swaps FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    
-    if result:
-        swaps_count, successful_swaps, failed_swaps = result
-    else:
-        swaps_count, successful_swaps, failed_swaps = 0, 0, 0
-    
-    # Update based on success/failure
-    swaps_count += 1
-    if success:
-        successful_swaps += 1
-    else:
-        failed_swaps += 1
-    
-    # Update database
-    c.execute('''UPDATE users SET 
-        swaps_count = ?,
-        successful_swaps = ?,
-        failed_swaps = ?,
-        last_active = CURRENT_TIMESTAMP
-        WHERE user_id = ?''', 
-        (swaps_count, successful_swaps, failed_swaps, user_id))
-    
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"Updated stats for user {user_id}: total={swaps_count}, success={successful_swaps}, failed={failed_swaps}")
-
-def add_swap_history(user_id: int, status: str, processing_time: float, 
-                     result_path: str = None, nsfw: bool = False) -> int:
-    """FIXED: Add a swap to history with proper status"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''INSERT INTO swaps_history 
-        (user_id, status, processing_time, result_path, nsfw_detected)
-        VALUES (?, ?, ?, ?, ?)''', 
-        (user_id, status, processing_time, result_path, 1 if nsfw else 0))
-    
-    swap_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"Swap history added: ID={swap_id}, User={user_id}, Status={status}")
-    return swap_id
-
-def add_favorite(user_id: int, swap_id: int) -> bool:
-    """Add a swap to favorites"""
-    try:
-        conn = get_db_connection()
+    def check_cooldown(self, key: str, cooldown_seconds: int) -> bool:
+        """Check if action is allowed (not in cooldown)"""
+        conn = self.get_connection()
         c = conn.cursor()
         
-        c.execute('SELECT id FROM favorites WHERE user_id = ? AND swap_id = ?', (user_id, swap_id))
-        if c.fetchone():
+        c.execute('SELECT last_action FROM cooldown_tracker WHERE key = ?', (key,))
+        row = c.fetchone()
+        
+        now = datetime.now().timestamp()
+        
+        if row:
+            last_action = datetime.fromisoformat(row[0]).timestamp()
+            elapsed = now - last_action
+            
+            if elapsed < cooldown_seconds:
+                conn.close()
+                return False
+            
+            c.execute('UPDATE cooldown_tracker SET last_action = CURRENT_TIMESTAMP WHERE key = ?', (key,))
+        else:
+            c.execute('INSERT INTO cooldown_tracker (key, last_action) VALUES (?, CURRENT_TIMESTAMP)', (key,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def update_stat(self, stat_name: str, increment: int = 1):
+        """Update statistics"""
+        valid_stats = ['rains_detected', 'buttons_clicked', 'links_joined', 'errors']
+        if stat_name in valid_stats:
+            conn = self.get_connection()
+            c = conn.cursor()
+            c.execute(f'''UPDATE statistics 
+                SET {stat_name} = {stat_name} + ?, last_updated = CURRENT_TIMESTAMP
+                WHERE id = 1''', (increment,))
+            conn.commit()
+            conn.close()
+    
+    def get_stats(self) -> Dict:
+        """Get all statistics"""
+        conn = self.get_connection()
+        c = conn.cursor()
+        c.execute('SELECT rains_detected, buttons_clicked, links_joined, errors, last_updated FROM statistics WHERE id = 1')
+        row = c.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'rains_detected': row[0],
+                'buttons_clicked': row[1],
+                'links_joined': row[2],
+                'errors': row[3],
+                'last_updated': row[4]
+            }
+        return {}
+    
+    def get_total_processed(self) -> int:
+        """Get total processed messages"""
+        conn = self.get_connection()
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM processed_messages')
+        result = c.fetchone()[0] or 0
+        conn.close()
+        return result
+
+# Initialize database
+db = Database()
+
+# ========== COOLDOWN MANAGER ==========
+class CooldownManager:
+    def __init__(self):
+        self.memory_cooldowns = {}
+    
+    def check_memory_cooldown(self, key: str, cooldown_seconds: int) -> bool:
+        """Memory-based cooldown for fast operations"""
+        now = time.time()
+        
+        if key in self.memory_cooldowns:
+            elapsed = now - self.memory_cooldowns[key]
+            if elapsed < cooldown_seconds:
+                return False
+        
+        self.memory_cooldowns[key] = now
+        return True
+
+cooldown = CooldownManager()
+
+# ========== HELPER FUNCTIONS ==========
+def contains_keywords(text: str) -> bool:
+    """Check if text contains rain/giveaway keywords"""
+    if not text:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Check direct keywords
+    for keyword in KEYWORDS:
+        if keyword.lower() in text_lower:
+            return True
+    
+    # Check patterns
+    patterns = [
+        r"/start\s+[A-Za-z0-9_]+",
+        r"claim\s+(?:your|free|reward)",
+        r"join\s+(?:here|now|quick)",
+        r"airdrop\s+(?:bot|claimer)",
+        r"free\s+\d+\s*(?:usdt|eth|btc|sol)",
+        r"win\s+\d+\s*(?:usdt|eth|btc|sol)",
+        r"participate.*(?:now|here)",
+        r"distribution.*(?:live|ongoing)",
+        r"giveaway.*(?:win|prize|reward)",
+        r"raffle.*(?:entry|join)"
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return True
+    
+    return False
+
+def should_click_button(button_text: str) -> bool:
+    """Determine if button should be clicked"""
+    if not button_text:
+        return False
+    
+    button_lower = button_text.lower()
+    
+    # Check for clickable texts
+    for text in CLICKABLE_BUTTON_TEXTS:
+        if text.lower() in button_lower:
+            return True
+    
+    # Check for emoji indicators
+    emoji_patterns = ["🎯", "✅", "🔗", "💰", "🎁", "🎰", "👆", "👉", "👇", "🎮"]
+    for emoji in emoji_patterns:
+        if emoji in button_text:
+            return True
+    
+    # Check for common patterns
+    patterns = [
+        r"^claim$", r"^join$", r"^start$", r"^verify$",
+        r"claim\s+now", r"join\s+airdrop", r"get\s+reward",
+        r"participate\s+now", r"click\s+here", r"tap\s+to"
+    ]
+    
+    for pattern in patterns:
+        if re.match(pattern, button_lower, re.IGNORECASE):
+            return True
+    
+    return False
+
+def extract_links(text: str) -> List[str]:
+    """Extract all links from text"""
+    links = []
+    
+    # Find URLs
+    url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+|t\.me/[^\s<>"]+'
+    found = re.findall(url_pattern, text)
+    
+    for link in found:
+        if not link.startswith('http'):
+            link = f'https://{link}'
+        links.append(link)
+    
+    return list(set(links))
+
+# ========== TELEGRAM SESSION VALIDATION ==========
+async def validate_session(session_string: str) -> Tuple[bool, Optional[str]]:
+    """Validate Telegram session string"""
+    if not session_string or session_string == "YOUR_SESSION_STRING_HERE":
+        return False, "Session string not configured"
+    
+    try:
+        client = TelegramClient(StringSession(session_string), 1, "b6bcc390bbf71818a6c6b2d3c2de5b86")
+        await client.connect()
+        
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, "Session not authorized"
+        
+        me = await client.get_me()
+        await client.disconnect()
+        
+        return True, f"Valid session for @{me.username if me.username else me.id}"
+    
+    except Exception as e:
+        return False, f"Session validation failed: {str(e)}"
+
+# ========== TELEGRAM SELF-BOT CLASS ==========
+class TelegramRainBot:
+    def __init__(self, session_string: str):
+        self.session_string = session_string
+        self.client = None
+        self.is_running = False
+        self.start_time = time.time()
+        
+    async def start(self):
+        """Start the selfbot"""
+        print("=" * 70)
+        print("🤖 TELEGRAM RAIN SELF-BOT v2.0")
+        print("=" * 70)
+        
+        # Validate session
+        is_valid, message = await validate_session(self.session_string)
+        if not is_valid:
+            print(f"❌ {message}")
             return False
         
-        c.execute('INSERT INTO favorites (user_id, swap_id) VALUES (?, ?)', (user_id, swap_id))
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Favorite added: User={user_id}, Swap={swap_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to add favorite: {e}")
-        return False
-
-def get_user_favorites(user_id: int, limit: int = 10) -> List[Tuple]:
-    """Get user's favorite swaps"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''SELECT s.id, s.result_path, s.swap_date, s.status 
-        FROM swaps_history s
-        JOIN favorites f ON s.id = f.swap_id 
-        WHERE f.user_id = ? 
-        ORDER BY f.saved_date DESC 
-        LIMIT ?''', (user_id, limit))
-    
-    favorites = c.fetchall()
-    conn.close()
-    return favorites
-
-def add_report(reporter_id: int, swap_id: int, reason: str) -> int:
-    """Add a report"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''INSERT INTO reports (reporter_id, reported_swap_id, reason)
-        VALUES (?, ?, ?)''', (reporter_id, swap_id, reason))
-    
-    report_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"Report added: ID={report_id}, Reporter={reporter_id}, Swap={swap_id}")
-    
-    # Notify admin
-    notify_admin_report(report_id, reporter_id, swap_id, reason)
-    
-    return report_id
-
-def get_pending_reports(limit: int = 20) -> List[Tuple]:
-    """Get pending reports"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''SELECT r.id, r.reporter_id, r.reported_swap_id, r.reason, 
-        r.report_date, u.username 
-        FROM reports r
-        LEFT JOIN users u ON r.reporter_id = u.user_id
-        WHERE r.status = 'pending'
-        ORDER BY r.report_date DESC 
-        LIMIT ?''', (limit,))
-    
-    reports = c.fetchall()
-    conn.close()
-    return reports
-
-def update_report_status(report_id: int, status: str, admin_notes: str = None) -> bool:
-    """Update report status"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        if admin_notes:
-            c.execute('''UPDATE reports SET status = ?, admin_notes = ? 
-                WHERE id = ?''', (status, admin_notes, report_id))
-        else:
-            c.execute('UPDATE reports SET status = ? WHERE id = ?', (status, report_id))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Report {report_id} updated to status: {status}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to update report: {e}")
-        return False
-
-# ========== FACE SWAP API FUNCTIONS ==========
-def call_face_swap_api(source_image: bytes, target_image: bytes) -> Optional[bytes]:
-    """Call the face swap API"""
-    try:
-        logger.info("Calling face swap API...")
-        
-        source_base64 = base64.b64encode(source_image).decode('utf-8')
-        target_base64 = base64.b64encode(target_image).decode('utf-8')
-        
-        payload = {
-            "source": source_base64,
-            "target": target_base64,
-            "security": {
-                "token": FACE_SWAP_API_TOKEN,
-                "type": "invisible",
-                "id": "deepswapper"
-            }
-        }
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': 'FaceSwapBot/3.5'
-        }
-        
-        response = requests.post(
-            FACE_SWAP_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=60
-        )
-        
-        logger.info(f"API Response Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            
-            if 'result' in result and result['result']:
-                result_image = base64.b64decode(result['result'])
-                logger.info(f"Successfully decoded result image: {len(result_image)} bytes")
-                return result_image
-            else:
-                logger.error(f"API response missing 'result': {result}")
-                return None
-        else:
-            logger.error(f"API Error {response.status_code}: {response.text}")
-            return None
-            
-    except requests.exceptions.Timeout:
-        logger.error("API request timed out")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API request failed: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error in face swap API call: {e}")
-        return None
-
-# ========== BOT HANDLERS ==========
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    """Handle /start and /help commands"""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    if user_id in BANNED_USERS:
-        bot.reply_to(message, "🚫 <b>Access Denied</b>\n\nYour account has been banned from using this bot.", parse_mode='HTML')
-        return
-    
-    register_user(
-        user_id,
-        message.from_user.username,
-        message.from_user.first_name,
-        message.from_user.last_name
-    )
-    
-    if chat_id in user_sessions:
-        del user_sessions[chat_id]
-    
-    if not check_channel_membership(user_id):
-        welcome_text = f"""👋 <b>Welcome to Face Swap Bot!</b>
-
-📢 <b>To use this bot, you must join our channel:</b>
-{REQUIRED_CHANNEL}
-
-<b>Steps:</b>
-1️⃣ Click the 'Join Channel' button below
-2️⃣ After joining, click 'Verify Membership'
-3️⃣ Start swapping faces!
-
-✨ <b>Features:</b>
-• High-quality face swapping
-• Save your favorite swaps
-• View swap history
-• Report inappropriate content
-
-<i>Note: The channel contains updates and announcements.</i>"""
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}"),
-            types.InlineKeyboardButton("✅ Verify Membership", callback_data="verify_join")
-        )
-        
-        bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode='HTML')
-    else:
-        verify_user(user_id)
-        show_main_menu(message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "verify_join")
-def verify_callback(call):
-    """Handle channel verification callback"""
-    user_id = call.from_user.id
-    
-    if check_channel_membership(user_id):
-        verify_user(user_id)
-        bot.answer_callback_query(call.id, "✅ Verified! You can now use the bot.")
-        
-        bot.edit_message_text(
-            "✅ <b>Verification Successful!</b>\n\nYou can now use all features of the bot.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML'
-        )
-        
-        time.sleep(1)
-        show_main_menu(call.message)
-    else:
-        bot.answer_callback_query(
-            call.id,
-            "❌ Please join the channel first!",
-            show_alert=True
-        )
-
-def show_main_menu(message):
-    """Show the main menu to the user"""
-    menu_text = """✨ <b>Face Swap Bot</b> ✨
-
-🎭 <b>Main Features:</b>
-• Swap faces between photos
-• Save favorite swaps
-• View swap history
-• Report inappropriate content
-
-📋 <b>Available Commands:</b>
-/swap - Start a new face swap
-/mystats - View your statistics
-/favorites - View saved swaps
-/history - View recent swaps
-/cancel - Cancel current swap
-/report - Report content
-/help - Show this help message
-
-💡 <b>Tips for Best Results:</b>
-✓ Use clear, front-facing photos
-✓ Good lighting works best
-✓ Single person per photo recommended
-✓ Avoid blurry or dark images
-
-👑 <b>Created by:</b> @VinitOG
-🔄 <b>Version:</b> 3.5"""
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🎭 Start Swap", callback_data="start_swap"),
-        types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⭐ Favorites", callback_data="view_favorites"),
-        types.InlineKeyboardButton("📜 History", callback_data="view_history")
-    )
-    
-    bot.send_message(message.chat.id, menu_text, reply_markup=markup, parse_mode='HTML')
-
-@bot.message_handler(commands=['swap'])
-def start_swap_command(message):
-    """Start a new face swap process"""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    if user_id in BANNED_USERS:
-        bot.reply_to(message, "🚫 Your account has been banned.")
-        return
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT verified FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    
-    if not result or result[0] == 0:
-        if not check_channel_membership(user_id):
-            bot.reply_to(message, f"❌ Please join {REQUIRED_CHANNEL} first and verify!")
-            return
-    
-    if chat_id in user_sessions:
-        del user_sessions[chat_id]
-    
-    user_sessions[chat_id] = {
-        'state': STATE_WAITING_SOURCE,
-        'user_id': user_id,
-        'source_photo': None,
-        'target_photo': None,
-        'start_time': None
-    }
-    
-    instructions = """🎭 <b>Face Swap Started!</b>
-
-📸 <b>Step 1 of 2:</b> Send the <b>SOURCE</b> photo
-(This is the face you want to use)
-
-💡 <b>Tips for best results:</b>
-✓ Clear, front-facing photo
-✓ Good lighting
-✓ Single person visible
-✓ Face should be clearly visible
-
-⏳ <b>What happens next:</b>
-1. You'll send the source photo
-2. Then send the target photo
-3. We'll process the swap
-4. You'll get the result
-
-❌ Type /cancel at any time to stop
-
-👉 <b>Please send the SOURCE photo now...</b>"""
-    
-    bot.reply_to(message, instructions, parse_mode='HTML')
-    logger.info(f"Started swap session for user {user_id}, waiting for source photo")
-
-@bot.callback_query_handler(func=lambda call: call.data == "start_swap")
-def start_swap_callback(call):
-    """Handle start swap callback"""
-    start_swap_command(call.message)
-
-@bot.message_handler(commands=['cancel'])
-def cancel_swap_command(message):
-    """Cancel the current swap"""
-    chat_id = message.chat.id
-    
-    if chat_id in user_sessions:
-        del user_sessions[chat_id]
-        
-        if chat_id in active_swaps:
-            del active_swaps[chat_id]
-        
-        cancel_text = """❌ <b>Swap Cancelled</b>
-
-Your face swap session has been cancelled.
-
-💡 You can start a new swap anytime with:
-• /swap command, or
-• Clicking "Start Swap" button
-
-We hope to see you again soon! 🎭"""
-        
-        bot.reply_to(message, cancel_text, parse_mode='HTML')
-        logger.info(f"Cancelled swap session for chat {chat_id}")
-    else:
-        bot.reply_to(message, "⚠️ No active swap to cancel. Use /swap to start a new one.")
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    """Handle photo uploads for face swapping"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if user_id in BANNED_USERS:
-        bot.reply_to(message, "🚫 Your account has been banned.")
-        return
-    
-    if chat_id not in user_sessions:
-        if chat_id in backup_restore_data and backup_restore_data[chat_id].get('waiting_for_backup'):
-            bot.reply_to(message, "📎 Please send the backup file as a document, not a photo.")
-            return
-        
-        bot.reply_to(message, "⚠️ No active swap session. Use /swap to start a new face swap.")
-        return
-    
-    session = user_sessions[chat_id]
-    state = session['state']
-    
-    file_id = message.photo[-1].file_id
-    
-    if state == STATE_WAITING_SOURCE:
-        bot.reply_to(message, "⏳ Downloading source photo...")
-        photo_data = download_telegram_photo(file_id)
-        
-        if photo_data:
-            session['source_photo'] = photo_data
-            session['state'] = STATE_WAITING_TARGET
-            session['start_time'] = time.time()
-            
-            bot.reply_to(message, """✅ <b>Source Photo Received!</b>
-
-📸 <b>Step 2 of 2:</b> Send the <b>TARGET</b> photo
-(This is the photo where the face will be placed)
-
-💡 <b>Tips for target photo:</b>
-✓ Clear, good quality image
-✓ Face should be visible
-✓ Similar lighting to source works best
-
-⏳ <b>Processing will start immediately after you send the target photo.</b>
-
-👉 <b>Please send the TARGET photo now...</b>""", parse_mode='HTML')
-            
-            logger.info(f"Source photo received for user {user_id}, waiting for target")
-        else:
-            bot.reply_to(message, "❌ Failed to download photo. Please try again.")
-    
-    elif state == STATE_WAITING_TARGET:
-        if session['source_photo'] is None:
-            bot.reply_to(message, "⚠️ Source photo missing. Please start over with /swap")
-            del user_sessions[chat_id]
-            return
-        
-        bot.reply_to(message, "⏳ Downloading target photo...")
-        photo_data = download_telegram_photo(file_id)
-        
-        if photo_data:
-            session['target_photo'] = photo_data
-            session['state'] = STATE_PROCESSING
-            
-            threading.Thread(
-                target=process_face_swap,
-                args=(chat_id, session),
-                daemon=True
-            ).start()
-            
-            logger.info(f"Target photo received for user {user_id}, starting processing")
-        else:
-            bot.reply_to(message, "❌ Failed to download photo. Please try again.")
-    
-    elif state == STATE_PROCESSING:
-        bot.reply_to(message, """⏳ <b>Please wait</b>
-
-Your swap is currently being processed. Please wait for it to complete before sending more photos.
-
-💡 If it's taking too long, you can:
-• Wait a bit more
-• Use /cancel and start over
-• Contact support if problem persists""", parse_mode='HTML')
-    
-    else:
-        bot.reply_to(message, "⚠️ Invalid session state. Please use /swap to start over.")
-        if chat_id in user_sessions:
-            del user_sessions[chat_id]
-
-def process_face_swap(chat_id, session):
-    """FIXED: Process the face swap with proper database updates"""
-    user_id = session['user_id']
-    source_photo = session['source_photo']
-    target_photo = session['target_photo']
-    start_time = session['start_time']
-    
-    try:
-        progress_msg = bot.send_message(
-            chat_id,
-            """🔄 <b>Processing Face Swap...</b>
-
-[░░░░░░░░░░] 0%
-⏱️ Estimated: Calculating...
-
-⚙️ <b>Initializing face detection...</b>
-💡 This may take 15-30 seconds...""",
-            parse_mode='HTML'
-        )
-        
-        active_swaps[chat_id] = {
-            'progress': 0,
-            'status': 'Initializing',
-            'start_time': time.time(),
-            'message_id': progress_msg.message_id
-        }
-        
-        for progress in [10, 25, 45, 65, 85]:
-            if chat_id not in active_swaps:
-                return
-                
-            time.sleep(1.5)
-            active_swaps[chat_id]['progress'] = progress
-            
-            bar = generate_progress_bar(progress)
-            est_time = estimate_time(active_swaps[chat_id]['start_time'], progress)
-            
-            status_text = "Detecting faces..." if progress < 30 else \
-                         "Aligning features..." if progress < 60 else \
-                         "Swapping faces..." if progress < 85 else \
-                         "Finalizing..."
-            
-            try:
-                bot.edit_message_text(
-                    f"""🔄 <b>Processing Face Swap...</b>
-
-[{bar}] {progress}%
-⏱️ Estimated: {est_time}
-
-⚙️ <b>Status:</b> {status_text}
-🎯 <b>Progress:</b> {progress}% complete""",
-                    chat_id,
-                    progress_msg.message_id,
-                    parse_mode='HTML'
-                )
-            except:
-                pass
-        
-        logger.info(f"Calling face swap API for user {user_id}")
+        # Create client
+        self.client = TelegramClient(StringSession(self.session_string), 1, "b6bcc390bbf71818a6c6b2d3c2de5b86")
         
         try:
-            bot.edit_message_text(
-                """🔄 <b>Processing Face Swap...</b>
-
-[██████░░░░] 90%
-⏱️ Estimated: 5-10 seconds
-
-⚙️ <b>Status:</b> Swapping faces with AI...
-🎯 <b>Progress:</b> Finalizing swap""",
-                chat_id,
-                progress_msg.message_id,
-                parse_mode='HTML'
-            )
-        except:
-            pass
-        
-        result_image = call_face_swap_api(source_photo, target_photo)
-        
-        processing_time = time.time() - start_time
-        
-        if result_image:
-            # Save result image
-            os.makedirs('results', exist_ok=True)
-            filename = f"swap_{user_id}_{int(time.time())}.png"
-            filepath = os.path.join('results', filename)
+            await self.client.start()
+            me = await self.client.get_me()
             
-            with open(filepath, 'wb') as f:
-                f.write(result_image)
+            print(f"✅ Logged in as: {me.first_name} (@{me.username})")
+            print(f"📱 Phone: {me.phone}")
+            print(f"🆔 User ID: {me.id}")
+            print("=" * 70)
             
-            # Update progress to 100%
-            try:
-                bot.edit_message_text(
-                    f"""✅ <b>Face Swap Complete!</b>
-
-[██████████] 100%
-⏱️ Time: {processing_time:.1f}s
-
-🎉 <b>Success!</b> Your face swap is ready.""",
-                    chat_id,
-                    progress_msg.message_id,
-                    parse_mode='HTML'
-                )
-            except:
-                pass
+            # Setup event handlers
+            self.setup_handlers()
             
-            # FIXED: Store swap in history FIRST
-            swap_id = add_swap_history(
-                user_id,
-                "success",  # Make sure status is "success"
-                processing_time,
-                filepath,
-                False
-            )
+            # Send startup message
+            await self.send_startup_message(me)
             
-            # FIXED: Update user statistics
-            update_user_stats(user_id, True)
+            self.is_running = True
+            logger.info(f"Selfbot started successfully for user @{me.username}")
             
-            # Notify admin
-            notify_admin_swap_complete(user_id, swap_id, processing_time, True)
+            return True
             
-            caption = f"""✨ <b>Face Swap Complete!</b>
-
-🆔 <b>Swap ID:</b> #{swap_id}
-⏱️ <b>Time:</b> {processing_time:.1f} seconds
-✅ <b>Status:</b> Success
-📊 <b>Your Stats:</b> {get_user_swap_count(user_id)} swaps, {get_user_success_rate(user_id)}% success rate
-
-💡 <b>Tips:</b>
-• Save to favorites for later
-• Share with friends
-• Try different photos
-
-<i>Note: Result quality depends on input photo quality.</i>"""
-            
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("⭐ Save Favorite", callback_data=f"fav_{swap_id}"),
-                types.InlineKeyboardButton("🔄 Swap Again", callback_data="start_swap")
-            )
-            markup.add(
-                types.InlineKeyboardButton("🚨 Report", callback_data=f"report_{swap_id}")
-            )
-            
-            with open(filepath, 'rb') as photo:
-                bot.send_photo(
-                    chat_id,
-                    photo,
-                    caption=caption,
-                    reply_markup=markup,
-                    parse_mode='HTML'
-                )
-            
-            logger.info(f"Swap successful for user {user_id}, ID={swap_id}, time: {processing_time:.2f}s, stats updated")
-            
-        else:
-            logger.error(f"Face swap API failed for user {user_id}")
-            
-            try:
-                bot.edit_message_text(
-                    f"""❌ <b>Face Swap Failed</b>
-
-[░░░░░░░░░░] 0%
-⏱️ Time: {processing_time:.1f}s
-
-⚠️ <b>Error:</b> Processing failed
-🔄 <b>Status:</b> Please try again
-
-💡 <b>Possible reasons:</b>
-• Poor quality photos
-• No faces detected
-• API service temporary issue
-• Connection timeout
-
-🎯 <b>Solution:</b> Try with different, clearer photos.""",
-                    chat_id,
-                    progress_msg.message_id,
-                    parse_mode='HTML'
-                )
-            except:
-                pass
-            
-            # FIXED: Store failed swap in history
-            swap_id = add_swap_history(user_id, "failed", processing_time)
-            
-            # FIXED: Update user stats for failed swap
-            update_user_stats(user_id, False)
-            
-            notify_admin_swap_complete(user_id, swap_id, processing_time, False)
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🔄 Try Again", callback_data="start_swap"))
-            
-            bot.send_message(
-                chat_id,
-                "😔 <b>Sorry, the face swap failed.</b>\n\nPlease try again with different photos.",
-                reply_markup=markup,
-                parse_mode='HTML'
-            )
+        except Exception as e:
+            logger.error(f"Failed to start selfbot: {e}")
+            print(f"❌ Failed to start: {e}")
+            return False
     
-    except Exception as e:
-        logger.error(f"Error in process_face_swap: {e}")
-        
+    async def send_startup_message(self, me):
+        """Send startup notification"""
         try:
-            bot.send_message(
-                chat_id,
-                f"""❌ <b>Unexpected Error</b>
-
-An unexpected error occurred during processing.
-
-⚠️ <b>Error:</b> {str(e)[:100]}
-🔄 <b>Please try again.</b>
-
-If this continues, contact support.""",
-                parse_mode='HTML'
-            )
-        except:
-            pass
-        
-        processing_time = time.time() - start_time if 'start_time' in session else 0
-        
-        # FIXED: Store error in history
-        add_swap_history(user_id, "error", processing_time)
-        
-        # FIXED: Update user stats for error
-        update_user_stats(user_id, False)
-        
-        notify_admin_swap_complete(user_id, 0, processing_time, False)
-    
-    finally:
-        # Clean up session
-        if chat_id in user_sessions:
-            del user_sessions[chat_id]
-        if chat_id in active_swaps:
-            del active_swaps[chat_id]
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('fav_'))
-def add_to_favorites_callback(call):
-    """Add swap to favorites"""
-    try:
-        swap_id = int(call.data.split('_')[1])
-        user_id = call.from_user.id
-        
-        if add_favorite(user_id, swap_id):
-            bot.answer_callback_query(call.id, "⭐ Added to favorites!")
+            monitored_groups = db.get_monitored_groups()
+            stats = db.get_stats()
             
-            try:
-                # Also mark as favorite in swaps_history
-                conn = get_db_connection()
-                c = conn.cursor()
-                c.execute('UPDATE swaps_history SET is_favorite = 1 WHERE id = ?', (swap_id,))
-                conn.commit()
-                conn.close()
-                
-                if call.message.caption:
-                    new_caption = call.message.caption + "\n\n⭐ <b>Saved to Favorites!</b>"
-                    bot.edit_message_caption(
-                        chat_id=call.message.chat.id,
-                        message_id=call.message.message_id,
-                        caption=new_caption,
-                        parse_mode='HTML',
-                        reply_markup=call.message.reply_markup
-                    )
-            except:
-                pass
-        else:
-            bot.answer_callback_query(call.id, "⚠️ Already in favorites!")
-            
-    except Exception as e:
-        logger.error(f"Favorite error: {e}")
-        bot.answer_callback_query(call.id, "❌ Error saving favorite")
+            message = f"""✅ <b>Rain Selfbot Started</b>
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('report_'))
-def report_swap_callback(call):
-    """Report a swap"""
-    swap_id = call.data.split('_')[1]
-    
-    msg = bot.send_message(
-        call.message.chat.id,
-        f"🚨 <b>Reporting Swap #{swap_id}</b>\n\nPlease describe the issue (inappropriate content, copyright, etc.):\n\n<i>Send your reason as a text message...</i>",
-        parse_mode='HTML'
-    )
-    
-    bot.register_next_step_handler(msg, lambda m: process_report(m, swap_id, call.from_user.id))
+👤 <b>User:</b> {me.first_name} (@{me.username})
+📱 <b>Phone:</b> {me.phone}
+🆔 <b>ID:</b> <code>{me.id}</code>
+🕒 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-def process_report(message, swap_id, reporter_id):
-    """Process the report"""
-    reason = message.text.strip()
-    
-    if len(reason) < 5:
-        bot.reply_to(message, "❌ Please provide a detailed reason (at least 5 characters).")
-        return
-    
-    report_id = add_report(reporter_id, int(swap_id), reason)
-    
-    bot.reply_to(message, f"""✅ <b>Report Submitted</b>
-
-Thank you for your report (ID: #{report_id}).
-
-📋 <b>Details:</b>
-• Swap ID: #{swap_id}
-• Reason: {reason[:100]}{'...' if len(reason) > 100 else ''}
-
-⚠️ <b>Note:</b> We will review this report within 24 hours.""", parse_mode='HTML')
-
-@bot.message_handler(commands=['mystats'])
-def my_stats_command(message):
-    """Show user statistics - FIXED to show accurate data"""
-    user_id = message.from_user.id
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''SELECT swaps_count, successful_swaps, failed_swaps, 
-        join_date, last_active FROM users WHERE user_id = ?''', (user_id,))
-    
-    result = c.fetchone()
-    
-    if result:
-        total, success, failed, join_date, last_active = result
-        
-        # Also get count from swaps_history for verification
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE user_id = ?', (user_id,))
-        history_count = c.fetchone()[0] or 0
-        
-        success_rate = round((success / max(1, total)) * 100, 1)
-        
-        join_date_str = join_date[:10] if join_date else 'Unknown'
-        last_active_str = last_active[:19] if last_active else 'Never'
-        
-        stats_text = f"""📊 <b>Your Statistics</b>
-
-🆔 <b>User ID:</b> <code>{user_id}</code>
-📅 <b>Joined:</b> {join_date_str}
-🕒 <b>Last Active:</b> {last_active_str}
-
-🔄 <b>Swap Statistics:</b>
-• Total Swaps: <b>{total}</b>
-• Successful: <b>{success}</b>
-• Failed: <b>{failed}</b>
-• Success Rate: <b>{success_rate}%</b>
-• History Records: <b>{history_count}</b>
-
-🏆 <b>Rank:</b> {'Beginner' if total < 5 else 'Intermediate' if total < 20 else 'Expert'}
-📈 <b>Activity Level:</b> {'New User' if total == 0 else 'Active' if total > 5 else 'Casual'}"""
-        
-        bot.reply_to(message, stats_text, parse_mode='HTML')
-    else:
-        bot.reply_to(message, "📊 No statistics found. Start with /swap to begin your journey!")
-    
-    conn.close()
-
-@bot.message_handler(commands=['favorites'])
-def show_favorites_command(message):
-    """Show user's favorite swaps"""
-    user_id = message.from_user.id
-    favorites = get_user_favorites(user_id, limit=15)
-    
-    if not favorites:
-        no_favs_text = """⭐ <b>No Favorites Yet</b>
-
-You haven't saved any swaps to favorites yet.
-
-💡 <b>How to save favorites:</b>
-1. Complete a face swap
-2. Click the "⭐ Save to Favorites" button
-3. Your swap will be saved here!
-
-🎭 <b>Get started:</b> Use /swap to create your first swap!"""
-        
-        bot.reply_to(message, no_favs_text, parse_mode='HTML')
-        return
-    
-    favorites_text = f"""⭐ <b>Your Favorite Swaps</b>
-
-📁 <b>Total Saved:</b> {len(favorites)}
-
-📋 <b>Recent Favorites:</b>\n"""
-    
-    for i, (swap_id, result_path, swap_date, status) in enumerate(favorites, 1):
-        emoji = "✅" if status == "success" else "❌"
-        date_str = swap_date[:16] if swap_date else "Unknown"
-        favorites_text += f"\n{i}. {emoji} <b>Swap #{swap_id}</b> - {date_str}"
-    
-    favorites_text += "\n\n💡 <b>Note:</b> Favorites are stored securely and can be accessed anytime."
-    
-    bot.reply_to(message, favorites_text, parse_mode='HTML')
-
-@bot.message_handler(commands=['history'])
-def show_history_command(message):
-    """Show user's swap history"""
-    user_id = message.from_user.id
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('''SELECT id, status, swap_date, processing_time 
-        FROM swaps_history 
-        WHERE user_id = ? 
-        ORDER BY swap_date DESC 
-        LIMIT 15''', (user_id,))
-    
-    history = c.fetchall()
-    conn.close()
-    
-    if not history:
-        no_history_text = """📜 <b>No Swap History</b>
-
-You haven't performed any swaps yet.
-
-🎭 <b>Ready to start?</b> Use /swap to create your first face swap!"""
-        
-        bot.reply_to(message, no_history_text, parse_mode='HTML')
-        return
-    
-    history_text = f"""📜 <b>Your Swap History</b>
-
-📊 <b>Total Swaps:</b> {len(history)}
-
-📋 <b>Recent Activity:</b>\n"""
-    
-    for i, (swap_id, status, swap_date, proc_time) in enumerate(history, 1):
-        emoji = "✅" if status == "success" else "❌"
-        date_str = swap_date[:16] if swap_date else "Unknown"
-        time_str = f"{proc_time:.1f}s" if proc_time else "N/A"
-        
-        history_text += f"\n{i}. {emoji} <b>Swap #{swap_id}</b>\n"
-        history_text += f"   📅 {date_str} | ⏱️ {time_str} | Status: {status}"
-    
-    # Get user stats for verification
-    user_stats = get_user_swap_count(user_id)
-    history_text += f"\n\n📊 <b>Stats Verification:</b>\nDatabase shows {user_stats} total swaps"
-    
-    bot.reply_to(message, history_text, parse_mode='HTML')
-
-@bot.callback_query_handler(func=lambda call: call.data == "my_stats")
-def stats_callback(call):
-    """Handle stats callback"""
-    my_stats_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "view_favorites")
-def favorites_callback(call):
-    """Handle favorites callback"""
-    show_favorites_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "view_history")
-def history_callback(call):
-    """Handle history callback"""
-    show_history_command(call.message)
-
-# ========== ADMIN COMMANDS ==========
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    """Admin panel access"""
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔ Access denied.")
-        return
-    
-    admin_text = f"""👑 <b>Admin Panel</b>
-
-🆔 <b>Admin ID:</b> <code>{ADMIN_ID}</code>
 📊 <b>Statistics:</b>
-• Users: {get_total_users()}
-• Active (24h): {get_active_users_count(1)}
-• Swaps: {get_total_swaps()}
-• Success Rate: {get_success_rate()}%
-• Banned: {len(BANNED_USERS)}
+• Rains Detected: {stats.get('rains_detected', 0)}
+• Buttons Clicked: {stats.get('buttons_clicked', 0)}
+• Links Joined: {stats.get('links_joined', 0)}
+• Monitored Groups: {len(monitored_groups)}
 
-🚨 <b>Pending Actions:</b>
-• Reports: {len(get_pending_reports())}
+⚙️ <b>Settings:</b>
+• Auto-Click: {'✅ ON' if AUTO_CLICK_BUTTONS else '❌ OFF'}
+• Auto-Join: {'✅ ON' if AUTO_JOIN_LINKS else '❌ OFF'}
+• Reactions: {'✅ ON' if SEND_REACTIONS else '❌ OFF'}
 
-⚙️ <b>Quick Commands:</b>
-/users - User management
-/reports - View reports
-/broadcast - Send message
-/botstatus - System status
-/createdbbackup - Backup data
-/restoredb - Restore data
-/fixstats - Fix statistics (NEW)"""
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-        types.InlineKeyboardButton("🚨 Reports", callback_data="admin_reports")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📊 Stats", callback_data="admin_stats"),
-        types.InlineKeyboardButton("💾 Backup", callback_data="admin_backup")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        types.InlineKeyboardButton("🔄 Status", callback_data="admin_status")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🔧 Fix Stats", callback_data="admin_fix_stats")
-    )
-    
-    bot.reply_to(message, admin_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_fix_stats")
-def admin_fix_stats_callback(call):
-    """Fix statistics"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    fix_statistics_command(call.message)
-
-@bot.message_handler(commands=['fixstats'])
-def fix_statistics_command(message):
-    """Fix all user statistics"""
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔ Access denied.")
-        return
-    
-    bot.reply_to(message, "🔧 <b>Fixing statistics...</b>\n\n⏳ This may take a moment...", parse_mode='HTML')
-    
-    def fix_stats_task():
-        try:
-            conn = get_db_connection()
-            c = conn.cursor()
+🚀 <b>Bot is now monitoring for rains...</b>"""
             
-            # Get all users
-            c.execute('SELECT user_id FROM users')
-            users = c.fetchall()
-            
-            fixed_count = 0
-            
-            for user_row in users:
-                user_id = user_row[0]
-                
-                # Count swaps from history
-                c.execute('SELECT COUNT(*), SUM(CASE WHEN status = "success" THEN 1 ELSE 0 END) FROM swaps_history WHERE user_id = ?', (user_id,))
-                result = c.fetchone()
-                
-                if result:
-                    total_swaps = result[0] or 0
-                    successful_swaps = result[1] or 0
-                    failed_swaps = total_swaps - successful_swaps
-                    
-                    # Update user stats
-                    c.execute('''UPDATE users SET 
-                        swaps_count = ?,
-                        successful_swaps = ?,
-                        failed_swaps = ?
-                        WHERE user_id = ?''',
-                        (total_swaps, successful_swaps, failed_swaps, user_id))
-                    
-                    fixed_count += 1
-            
-            conn.commit()
-            conn.close()
-            
-            bot.send_message(
-                message.chat.id,
-                f"""✅ <b>Statistics Fixed!</b>
-
-📊 <b>Results:</b>
-• Users updated: {fixed_count}
-• Total users: {len(users)}
-• Time: {datetime.now().strftime('%H:%M:%S')}
-
-🔄 <b>Stats have been recalculated from swap history.</b>""",
-                parse_mode='HTML'
-            )
+            await self.client.send_message(ALERT_CHANNEL, message, parse_mode='HTML')
             
         except Exception as e:
-            logger.error(f"Fix stats error: {e}")
-            bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
+            logger.error(f"Failed to send startup message: {e}")
     
-    threading.Thread(target=fix_stats_task, daemon=True).start()
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_stats")
-def admin_stats_callback(call):
-    """Admin stats callback"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history')
-    total_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-    success_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
-    failed_swaps = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
-    verified_users = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
-    pending_reports = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM favorites')
-    total_favorites = c.fetchone()[0] or 0
-    
-    c.execute('SELECT COUNT(*) FROM users WHERE DATE(join_date) = DATE("now")')
-    new_today = c.fetchone()[0] or 0
-    
-    # Verify consistency
-    c.execute('SELECT SUM(swaps_count), SUM(successful_swaps), SUM(failed_swaps) FROM users')
-    user_stats = c.fetchone()
-    user_total = user_stats[0] or 0
-    user_success = user_stats[1] or 0
-    user_failed = user_stats[2] or 0
-    
-    success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
-    
-    conn.close()
-    
-    stats_text = f"""📊 <b>Admin Statistics</b>
-
-👥 <b>Users:</b>
-• Total: {get_total_users()}
-• Verified: {verified_users}
-• New Today: {new_today}
-• Banned: {len(BANNED_USERS)}
-
-🔄 <b>Swaps:</b>
-• Total (History): {total_swaps}
-• Successful: {success_swaps}
-• Failed: {failed_swaps}
-• Success Rate: {success_rate}%
-• From User Stats: {user_total} (✅{user_success} ❌{user_failed})
-
-⭐ <b>Engagement:</b>
-• Favorites: {total_favorites}
-• Pending Reports: {pending_reports}
-• Active Sessions: {len(user_sessions)}
-
-📱 <b>Current:</b>
-• Active Swaps: {len(active_swaps)}
-• Memory Usage: OK
-• Database: Connected"""
-
-    bot.edit_message_text(
-        stats_text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_users")
-def admin_users_callback(call):
-    """Admin users callback"""
-    list_users_command(call.message)
-
-@bot.message_handler(commands=['users'])
-def list_users_command(message):
-    """List all users"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    users = get_all_users(limit=50)
-    
-    if not users:
-        bot.reply_to(message, "📭 No users found.")
-        return
-    
-    page = 0
-    users_per_page = 5
-    total_pages = (len(users) + users_per_page - 1) // users_per_page
-    
-    start_idx = page * users_per_page
-    end_idx = min(start_idx + users_per_page, len(users))
-    page_users = users[start_idx:end_idx]
-    
-    users_text = f"""👥 <b>User Management</b>
-
-📊 <b>Total Users:</b> {len(users)}
-📑 <b>Page:</b> {page + 1}/{total_pages}
-
-━━━━━━━━━━━━━━━━━━\n"""
-    
-    for user in page_users:
-        user_id, username, first_name, last_name, join_date, last_active, banned, verified, total, success, failed = user
+    def setup_handlers(self):
+        """Setup Telegram event handlers"""
         
-        status = "🔴 BANNED" if banned else "🟢 ACTIVE"
-        verified_status = "✅" if verified else "❌"
-        username_display = f"@{username}" if username else f"ID:{user_id}"
-        
-        users_text += f"\n🆔 <b>{user_id}</b>\n"
-        users_text += f"👤 {username_display}\n"
-        users_text += f"📛 {first_name} {last_name or ''}\n"
-        users_text += f"📊 {status} | Verified: {verified_status}\n"
-        users_text += f"🔄 Swaps: {total} (✅{success} ❌{failed})\n"
-        users_text += f"📅 Joined: {join_date[:10] if join_date else 'N/A'}\n"
-        users_text += f"━━━━━━━━━━━━━━━━━━\n"
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    for user in page_users:
-        user_id = user[0]
-        username = user[1] or f"ID:{user_id}"
-        is_banned = user[6]
-        
-        if is_banned:
-            markup.add(types.InlineKeyboardButton(
-                f"🟢 Unban {username[:15]}",
-                callback_data=f"admin_unban_{user_id}"
-            ))
-        else:
-            markup.add(types.InlineKeyboardButton(
-                f"🔴 Ban {username[:15]}",
-                callback_data=f"admin_ban_{user_id}"
-            ))
-    
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton("⬅️ Previous", callback_data=f"admin_users_page_{page-1}"))
-    
-    if page < total_pages - 1:
-        nav_buttons.append(types.InlineKeyboardButton("Next ➡️", callback_data=f"admin_users_page_{page+1}"))
-    
-    if nav_buttons:
-        markup.row(*nav_buttons)
-    
-    markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_users_refresh"))
-    markup.add(types.InlineKeyboardButton("🔧 Fix User Stats", callback_data="admin_fix_user_stats"))
-    
-    bot.reply_to(message, users_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_fix_user_stats")
-def admin_fix_user_stats_callback(call):
-    """Fix stats for current page users"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    # Parse the message to get users
-    message_text = call.message.text
-    
-    # Extract user IDs from message
-    import re
-    user_ids = re.findall(r'🆔 <b>(\d+)</b>', message_text)
-    
-    if not user_ids:
-        bot.answer_callback_query(call.id, "❌ No users found")
-        return
-    
-    fixed = 0
-    for user_id_str in user_ids:
-        user_id = int(user_id_str)
-        
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        # Count swaps from history
-        c.execute('SELECT COUNT(*), SUM(CASE WHEN status = "success" THEN 1 ELSE 0 END) FROM swaps_history WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        
-        if result:
-            total_swaps = result[0] or 0
-            successful_swaps = result[1] or 0
-            failed_swaps = total_swaps - successful_swaps
-            
-            # Update user stats
-            c.execute('''UPDATE users SET 
-                swaps_count = ?,
-                successful_swaps = ?,
-                failed_swaps = ?
-                WHERE user_id = ?''',
-                (total_swaps, successful_swaps, failed_swaps, user_id))
-            
-            conn.commit()
-            fixed += 1
-        
-        conn.close()
-    
-    bot.answer_callback_query(call.id, f"✅ Fixed stats for {fixed} users")
-    list_users_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_ban_'))
-def admin_ban_callback(call):
-    """Ban user from admin panel"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    user_id = int(call.data.split('_')[2])
-    ban_user(user_id)
-    
-    try:
-        bot.send_message(user_id, "🚫 <b>You have been banned from using this bot.</b>", parse_mode='HTML')
-    except:
-        pass
-    
-    bot.answer_callback_query(call.id, f"✅ User {user_id} banned!")
-    list_users_command(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_unban_'))
-def admin_unban_callback(call):
-    """Unban user from admin panel"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    user_id = int(call.data.split('_')[2])
-    unban_user(user_id)
-    
-    try:
-        bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML')
-    except:
-        pass
-    
-    bot.answer_callback_query(call.id, f"✅ User {user_id} unbanned!")
-    list_users_command(call.message)
-
-@bot.message_handler(commands=['ban'])
-def ban_command(message):
-    """Ban a user by ID"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /ban <user_id>")
-            return
-        
-        user_id = int(parts[1])
-        ban_user(user_id)
-        
-        try:
-            bot.send_message(user_id, "🚫 <b>You have been banned from using this bot.</b>", parse_mode='HTML')
-        except:
-            pass
-        
-        bot.reply_to(message, f"✅ User {user_id} has been banned.")
-        
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
-
-@bot.message_handler(commands=['unban'])
-def unban_command(message):
-    """Unban a user by ID"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /unban <user_id>")
-            return
-        
-        user_id = int(parts[1])
-        unban_user(user_id)
-        
-        try:
-            bot.send_message(user_id, "✅ <b>Your ban has been lifted! You can now use the bot again.</b>", parse_mode='HTML')
-        except:
-            pass
-        
-        bot.reply_to(message, f"✅ User {user_id} has been unbanned.")
-        
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_reports")
-def admin_reports_callback(call):
-    """Admin reports callback"""
-    view_reports_command(call.message)
-
-@bot.message_handler(commands=['reports'])
-def view_reports_command(message):
-    """View all reports"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    reports = get_pending_reports()
-    
-    if not reports:
-        bot.reply_to(message, "📭 No pending reports.")
-        return
-    
-    reports_text = f"""🚨 <b>REPORT MANAGEMENT</b>
-
-📊 <b>Pending Reports:</b> {len(reports)}
-
-━━━━━━━━━━━━━━━━━━\n"""
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    for report in reports[:5]:
-        report_id, reporter_id, swap_id, reason, report_date, username = report
-        
-        username_display = f"@{username}" if username else f"ID:{reporter_id}"
-        
-        reports_text += f"\n🆔 <b>Report #{report_id}</b>\n"
-        reports_text += f"👤 Reporter: {username_display}\n"
-        reports_text += f"🔄 Swap ID: #{swap_id}\n"
-        reports_text += f"📝 Reason: {reason[:50]}{'...' if len(reason) > 50 else ''}\n"
-        reports_text += f"⏰ Date: {report_date[:16] if report_date else 'N/A'}\n"
-        reports_text += f"━━━━━━━━━━━━━━━━━━\n"
-        
-        markup.add(
-            types.InlineKeyboardButton(f"✅ Resolve #{report_id}", callback_data=f"resolve_{report_id}"),
-            types.InlineKeyboardButton(f"👁️ View #{swap_id}", callback_data=f"view_swap_{swap_id}")
-        )
-    
-    markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_reports"))
-    
-    bot.reply_to(message, reports_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('resolve_'))
-def resolve_report_callback(call):
-    """Resolve a report"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    report_id = int(call.data.split('_')[1])
-    
-    msg = bot.send_message(
-        call.message.chat.id,
-        f"📝 <b>Resolving Report #{report_id}</b>\n\nPlease enter resolution notes:",
-        parse_mode='HTML'
-    )
-    
-    bot.register_next_step_handler(msg, lambda m: process_resolution(m, report_id))
-
-def process_resolution(message, report_id):
-    """Process report resolution"""
-    admin_notes = message.text.strip()
-    
-    if update_report_status(report_id, "resolved", admin_notes):
-        bot.reply_to(message, f"✅ Report #{report_id} has been resolved.")
-    else:
-        bot.reply_to(message, f"❌ Failed to resolve report #{report_id}.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('view_swap_'))
-def view_swap_callback(call):
-    """View swap details"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    swap_id = int(call.data.split('_')[2])
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''SELECT s.*, u.username, u.user_id, u.swaps_count, u.successful_swaps
-        FROM swaps_history s
-        JOIN users u ON s.user_id = u.user_id
-        WHERE s.id = ?''', (swap_id,))
-    
-    swap = c.fetchone()
-    conn.close()
-    
-    if swap:
-        swap_info = f"""🔄 <b>Swap Details</b>
-
-🆔 Swap ID: #{swap['id']}
-👤 User: @{swap['username']} (ID: {swap['user_id']})
-📅 Date: {swap['swap_date']}
-⏱️ Time: {swap['processing_time']:.1f}s
-✅ Status: {swap['status']}
-⭐ Favorite: {'Yes' if swap['is_favorite'] else 'No'}
-🚨 NSFW: {'Detected' if swap['nsfw_detected'] else 'Clean'}
-
-📁 Path: {swap['result_path'] or 'N/A'}
-
-📊 <b>User Stats:</b>
-• Total Swaps: {swap['swaps_count']}
-• Successful: {swap['successful_swaps']}
-• Success Rate: {round((swap['successful_swaps'] / max(1, swap['swaps_count'])) * 100, 1)}%"""
-        
-        bot.answer_callback_query(call.id, "Swap details loaded")
-        bot.send_message(call.message.chat.id, swap_info, parse_mode='HTML')
-    else:
-        bot.answer_callback_query(call.id, "❌ Swap not found")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
-def admin_broadcast_callback(call):
-    """Admin broadcast callback"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    msg = bot.send_message(
-        call.message.chat.id,
-        "📢 <b>Broadcast Message</b>\n\nPlease enter your broadcast message:",
-        parse_mode='HTML'
-    )
-    
-    bot.register_next_step_handler(msg, process_broadcast)
-
-def process_broadcast(message):
-    """Process broadcast message"""
-    broadcast_text = message.text.strip()
-    
-    if not broadcast_text:
-        bot.reply_to(message, "❌ Broadcast message cannot be empty.")
-        return
-    
-    confirm_text = f"""📢 <b>BROADCAST CONFIRMATION</b>
-
-<b>Message:</b>
-{broadcast_text}
-
-<b>Recipients:</b> {get_total_users() - len(BANNED_USERS)} users
-<b>Banned users excluded:</b> {len(BANNED_USERS)}
-
-⚠️ <b>Are you sure?</b>"""
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("✅ Send", callback_data=f"broadcast_send_{hashlib.md5(broadcast_text.encode()).hexdigest()[:8]}"),
-        types.InlineKeyboardButton("❌ Cancel", callback_data="broadcast_cancel")
-    )
-    
-    bot.reply_to(message, confirm_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('broadcast_send_'))
-def send_broadcast_callback(call):
-    """Send broadcast"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    original_text = call.message.text
-    lines = original_text.split('\n')
-    
-    message_start = None
-    message_end = None
-    
-    for i, line in enumerate(lines):
-        if "Message:" in line:
-            message_start = i + 1
-        if "Recipients:" in line and message_start is not None:
-            message_end = i
-            break
-    
-    if message_start is None or message_end is None:
-        bot.answer_callback_query(call.id, "❌ Could not extract message.")
-        return
-    
-    broadcast_text = '\n'.join(lines[message_start:message_end]).strip()
-    
-    bot.edit_message_text(
-        "📢 <b>Sending broadcast...</b>\n\n⏳ Please wait...",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-    
-    users = get_all_users(limit=1000)
-    sent = 0
-    failed = 0
-    
-    for user in users:
-        user_id = user[0]
-        
-        if user_id in BANNED_USERS:
-            continue
-        
-        try:
-            bot.send_message(
-                user_id,
-                f"""📢 <b>Announcement from Admin</b>
-
-{broadcast_text}
-
-<i>This is an automated message from Face Swap Bot.</i>""",
-                parse_mode='HTML'
-            )
-            sent += 1
-            time.sleep(0.05)
-            
-        except:
-            failed += 1
-    
-    result_text = f"""✅ <b>Broadcast Complete!</b>
-
-📊 <b>Results:</b>
-• Sent: <b>{sent}</b> users
-• Failed: <b>{failed}</b> users
-
-🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}"""
-    
-    bot.edit_message_text(
-        result_text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "broadcast_cancel")
-def cancel_broadcast_callback(call):
-    """Cancel broadcast"""
-    bot.edit_message_text(
-        "❌ <b>Broadcast cancelled.</b>",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_backup")
-def admin_backup_callback(call):
-    """Admin backup callback"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    create_backup_command(call.message)
-
-@bot.message_handler(commands=['createdbbackup'])
-def create_backup_command(message):
-    """Create database backup"""
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔ Access denied.")
-        return
-    
-    bot.reply_to(message, "💾 <b>Creating database backup...</b>\n\n⏳ Please wait...", parse_mode='HTML')
-    
-    def backup_task():
-        try:
-            backup_bytes = create_database_backup()
-            
-            if backup_bytes:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"face_swap_backup_{timestamp}.zip"
+        @self.client.on(events.NewMessage(incoming=True))
+        async def message_handler(event):
+            """Handle incoming messages"""
+            try:
+                # Skip our own messages
+                if event.out:
+                    return
                 
-                bot.send_document(
-                    message.chat.id,
-                    (filename, backup_bytes),
-                    caption=f"""✅ <b>Database Backup Created!</b>
-
-📁 Filename: {filename}
-📊 Size: {len(backup_bytes) / 1024:.1f} KB
-🕒 Time: {datetime.now().strftime('%H:%M:%S')}
-👤 Created by: Admin
-
-⚠️ <b>IMPORTANT:</b>
-• Save this file before updating code
-• Use /restoredb to restore
-• Store in a safe place"""
-                )
+                # Check if from monitored group
+                chat = await event.get_chat()
+                if not db.is_group_monitored(chat.id):
+                    return
                 
-                local_filename = f"backup_{timestamp}.zip"
-                with open(local_filename, 'wb') as f:
-                    f.write(backup_bytes)
+                # Check if already processed
+                if db.is_message_processed(chat.id, event.message.id):
+                    return
                 
-                logger.info(f"Backup saved as {local_filename}")
+                # Check cooldown
+                if not db.check_cooldown(f"chat_{chat.id}", CHAT_COOLDOWN):
+                    return
+                
+                # Check for keywords
+                message_text = event.message.text or event.message.raw_text or ""
+                if not contains_keywords(message_text):
+                    return
+                
+                logger.info(f"Rain detected in chat: {getattr(chat, 'title', 'Unknown')}")
+                db.mark_message_processed(chat.id, event.message.id)
+                
+                # Process the message
+                await self.process_rain_message(event)
+                
+            except Exception as e:
+                logger.error(f"Message handler error: {e}")
+                db.update_stat('errors')
+        
+        @self.client.on(events.NewMessage(pattern=r'^!add\s+', outgoing=True))
+        async def add_command_handler(event):
+            """Handle !add command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                args = event.message.text.split(maxsplit=1)
+                if len(args) < 2:
+                    await event.reply("❌ Usage: `!add <group_id|@username|link>`")
+                    return
+                
+                await self.handle_add_command(event, args[1])
+                
+            except Exception as e:
+                logger.error(f"Add command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+        
+        @self.client.on(events.NewMessage(pattern=r'^!remove\s+', outgoing=True))
+        async def remove_command_handler(event):
+            """Handle !remove command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                args = event.message.text.split(maxsplit=1)
+                if len(args) < 2:
+                    await event.reply("❌ Usage: `!remove <group_id>`")
+                    return
+                
+                await self.handle_remove_command(event, args[1])
+                
+            except Exception as e:
+                logger.error(f"Remove command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+        
+        @self.client.on(events.NewMessage(pattern=r'^!list$', outgoing=True))
+        async def list_command_handler(event):
+            """Handle !list command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                await self.handle_list_command(event)
+                
+            except Exception as e:
+                logger.error(f"List command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+        
+        @self.client.on(events.NewMessage(pattern=r'^!stats$', outgoing=True))
+        async def stats_command_handler(event):
+            """Handle !stats command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                await self.handle_stats_command(event)
+                
+            except Exception as e:
+                logger.error(f"Stats command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+        
+        @self.client.on(events.NewMessage(pattern=r'^!help$', outgoing=True))
+        async def help_command_handler(event):
+            """Handle !help command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                await self.handle_help_command(event)
+                
+            except Exception as e:
+                logger.error(f"Help command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+        
+        @self.client.on(events.NewMessage(pattern=r'^!ping$', outgoing=True))
+        async def ping_command_handler(event):
+            """Handle !ping command"""
+            try:
+                if event.sender_id != ADMIN_ID:
+                    return
+                
+                await self.handle_ping_command(event)
+                
+            except Exception as e:
+                logger.error(f"Ping command error: {e}")
+                await event.reply(f"❌ Error: {str(e)}")
+    
+    async def process_rain_message(self, event):
+        """Process a rain/giveaway message"""
+        try:
+            chat = await event.get_chat()
+            message = event.message
+            
+            clicked_buttons = []
+            joined_links = []
+            
+            # Process inline buttons
+            if AUTO_CLICK_BUTTONS:
+                buttons_clicked = await self.click_buttons(chat.id, message)
+                clicked_buttons.extend(buttons_clicked)
+            
+            # Process links
+            if AUTO_JOIN_LINKS:
+                message_text = message.text or message.raw_text or ""
+                links = extract_links(message_text)
+                
+                for link in links:
+                    if db.check_cooldown(f"link_{chat.id}", CHAT_COOLDOWN):
+                        success, result = await self.join_link(link)
+                        if success:
+                            joined_links.append(link)
+                            db.update_stat('links_joined')
+                            await asyncio.sleep(0.5)
+            
+            # Add reaction
+            if SEND_REACTIONS:
+                try:
+                    reaction = ReactionEmoji(emoticon=REACTION_EMOJI)
+                    await self.client(SendReactionRequest(
+                        peer=await message.get_input_chat(),
+                        msg_id=message.id,
+                        reaction=[reaction]
+                    ))
+                except Exception:
+                    pass
+            
+            # Update statistics
+            db.update_stat('rains_detected')
+            if clicked_buttons:
+                db.update_stat('buttons_clicked', len(clicked_buttons))
+            
+            # Send alert
+            await self.send_alert(chat, message, clicked_buttons, joined_links)
+            
+            logger.info(f"Processed rain in {getattr(chat, 'title', 'Unknown')}: "
+                       f"buttons={len(clicked_buttons)}, links={len(joined_links)}")
+            
+        except Exception as e:
+            logger.error(f"Process rain error: {e}")
+            db.update_stat('errors')
+    
+    async def click_buttons(self, chat_id: int, message) -> List[str]:
+        """Click all relevant buttons in a message"""
+        clicked = []
+        
+        if not hasattr(message, 'reply_markup') or not message.reply_markup:
+            return clicked
+        
+        try:
+            if hasattr(message.reply_markup, 'rows'):
+                for row in message.reply_markup.rows:
+                    for button in row.buttons:
+                        button_text = getattr(button, 'text', '')
+                        
+                        if should_click_button(button_text):
+                            # Check cooldown
+                            if not cooldown.check_memory_cooldown(f"button_{chat_id}", BUTTON_COOLDOWN):
+                                continue
+                            
+                            try:
+                                if hasattr(button, 'data'):  # Callback button
+                                    await self.client(GetBotCallbackAnswerRequest(
+                                        peer=chat_id,
+                                        msg_id=message.id,
+                                        data=button.data
+                                    ))
+                                    clicked.append(button_text[:20])
+                                    await asyncio.sleep(0.3)
+                                
+                                elif hasattr(button, 'url'):  # URL button
+                                    # We'll handle URLs in join_link function
+                                    pass
+                                
+                            except Exception as e:
+                                logger.debug(f"Failed to click button '{button_text}': {e}")
+        
+        except Exception as e:
+            logger.error(f"Button clicking error: {e}")
+        
+        return clicked
+    
+    async def join_link(self, link: str) -> Tuple[bool, str]:
+        """Join a Telegram link"""
+        try:
+            # Clean link
+            if '?' in link:
+                link = link.split('?')[0]
+            
+            if 't.me/' not in link:
+                return False, "Not a Telegram link"
+            
+            # Handle different types of links
+            if '/joinchat/' in link or '+' in link:
+                # Private group
+                await self.client(JoinChannelRequest(link))
+                return True, f"Joined private group: {link}"
+            
+            elif '/start' in link:
+                # Bot with start parameter
+                parts = link.split('t.me/')[1].split('/')
+                if len(parts) >= 1:
+                    username = parts[0]
+                    
+                    if username.endswith('bot'):
+                        entity = await self.client.get_entity(f'@{username}')
+                        
+                        if len(parts) >= 3:
+                            start_param = parts[2]
+                            await self.client.send_message(entity, f'/start {start_param}')
+                        else:
+                            await self.client.send_message(entity, '/start')
+                        
+                        return True, f"Started bot: @{username}"
+            
             else:
-                bot.reply_to(message, "❌ <b>Backup creation failed!</b>", parse_mode='HTML')
+                # Public group/channel
+                username = link.split('t.me/')[1].split('/')[0]
+                entity = await self.client.get_entity(f'@{username}')
                 
+                if hasattr(entity, 'megagroup') or hasattr(entity, 'broadcast'):
+                    await self.client(JoinChannelRequest(f'@{username}'))
+                    return True, f"Joined: @{username}"
+                else:
+                    # Try to start chat
+                    await self.client.send_message(entity, '/start')
+                    return True, f"Started chat with: @{username}"
+            
+            return False, "Unknown link type"
+            
         except Exception as e:
-            logger.error(f"Backup task error: {e}")
-            bot.reply_to(message, f"❌ <b>Backup error:</b> {str(e)}", parse_mode='HTML')
+            logger.error(f"Failed to join link {link}: {e}")
+            return False, str(e)
     
-    threading.Thread(target=backup_task, daemon=True).start()
+    async def send_alert(self, chat, message, clicked_buttons: List[str] = None, joined_links: List[str] = None):
+        """Send alert about detected rain"""
+        try:
+            chat_title = getattr(chat, 'title', 'Private Chat') or 'Private Chat'
+            
+            sender = await message.get_sender()
+            sender_name = ""
+            if sender:
+                first = getattr(sender, 'first_name', '')
+                last = getattr(sender, 'last_name', '')
+                username = getattr(sender, 'username', '')
+                
+                if first:
+                    sender_name = first
+                    if last:
+                        sender_name += f" {last}"
+                if username:
+                    sender_name += f" (@{username})"
+            
+            # Format message preview
+            message_text = message.text or message.raw_text or ""
+            preview = message_text[:300] + ("..." if len(message_text) > 300 else "")
+            
+            # Build alert
+            alert_lines = [
+                "🚨 <b>RAIN DETECTED!</b>",
+                "",
+                f"<b>Chat:</b> {chat_title}",
+                f"<b>From:</b> {sender_name}",
+                f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S')}",
+                ""
+            ]
+            
+            if clicked_buttons:
+                alert_lines.append(f"<b>Buttons clicked:</b> {', '.join(clicked_buttons[:3])}")
+                if len(clicked_buttons) > 3:
+                    alert_lines[-1] += f" (+{len(clicked_buttons)-3} more)"
+            
+            if joined_links:
+                alert_lines.append(f"<b>Links joined:</b> {len(joined_links)}")
+            
+            alert_lines.extend([
+                "",
+                "<b>Message:</b>",
+                f"<code>{preview}</code>",
+                ""
+            ])
+            
+            # Add message link if available
+            if hasattr(message, 'id'):
+                alert_lines.append(f"🔗 <a href='https://t.me/c/{str(chat.id).replace('-100', '')}/{message.id}'>Jump to message</a>")
+            
+            alert_msg = "\n".join(alert_lines)
+            
+            await self.client.send_message(
+                ALERT_CHANNEL,
+                alert_msg,
+                parse_mode='HTML',
+                link_preview=False
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to send alert: {e}")
+    
+    async def handle_add_command(self, event, args: str):
+        """Handle !add command"""
+        try:
+            identifier = args.strip()
+            
+            if identifier.isdigit() or (identifier.startswith('-100') and identifier[4:].isdigit()):
+                # Numeric ID
+                group_id = int(identifier)
+                if not group_id < 0:
+                    group_id = -1000000000000 - group_id
+                
+                entity = await self.client.get_entity(group_id)
+                title = getattr(entity, 'title', f"Group {group_id}")
+                username = getattr(entity, 'username', None)
+            
+            elif identifier.startswith('@'):
+                # Username
+                entity = await self.client.get_entity(identifier)
+                group_id = entity.id
+                title = getattr(entity, 'title', identifier)
+                username = identifier.lstrip('@')
+            
+            elif 't.me/' in identifier:
+                # Link
+                if '/joinchat/' in identifier or '+' in identifier:
+                    # Private group
+                    await self.client(JoinChannelRequest(identifier))
+                    entity = await self.client.get_participants(identifier, limit=1)
+                    if entity:
+                        group_id = entity[0].id
+                        title = "Private Group"
+                        username = None
+                else:
+                    # Public group/channel
+                    username = identifier.split('t.me/')[1].split('/')[0]
+                    entity = await self.client.get_entity(f'@{username}')
+                    group_id = entity.id
+                    title = getattr(entity, 'title', username)
+            
+            else:
+                # Try as username without @
+                entity = await self.client.get_entity(f'@{identifier}')
+                group_id = entity.id
+                title = getattr(entity, 'title', identifier)
+                username = identifier
+            
+            # Add to database
+            sender = await event.get_sender()
+            added_by = getattr(sender, 'username', 'admin')
+            
+            success = db.add_group(group_id, title, username, added_by)
+            
+            if success:
+                await event.reply(f"""✅ <b>Group Added to Monitoring</b>
 
-@bot.message_handler(commands=['restoredb'])
-def restore_database_command(message):
-    """Start database restore process"""
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔ Access denied.")
-        return
-    
-    restore_text = """🔄 <b>Database Restore Process</b>
+<b>Name:</b> {title}
+<b>ID:</b> <code>{group_id}</code>
+<b>Username:</b> {f'@{username}' if username else 'N/A'}
+<b>Added by:</b> @{added_by}
 
-⚠️ <b>WARNING:</b> This will overwrite current database!
-Make sure you have a backup first.
+📊 Now monitoring: {len(db.get_monitored_groups())} groups""", parse_mode='HTML')
+            else:
+                await event.reply("❌ Failed to add group to database")
+            
+        except Exception as e:
+            logger.error(f"Add command error: {e}")
+            await event.reply(f"❌ Error: {str(e)[:200]}")
+    
+    async def handle_remove_command(self, event, args: str):
+        """Handle !remove command"""
+        try:
+            group_id_str = args.strip()
+            
+            if group_id_str.isdigit() or (group_id_str.startswith('-100') and group_id_str[4:].isdigit()):
+                group_id = int(group_id_str)
+                if not group_id < 0:
+                    group_id = -1000000000000 - group_id
+            else:
+                await event.reply("❌ Please provide a numeric group ID")
+                return
+            
+            success = db.remove_group(group_id)
+            
+            if success:
+                await event.reply(f"✅ Removed group <code>{group_id}</code> from monitoring", parse_mode='HTML')
+            else:
+                await event.reply("❌ Group not found in monitoring list")
+            
+        except Exception as e:
+            logger.error(f"Remove command error: {e}")
+            await event.reply(f"❌ Error: {str(e)}")
+    
+    async def handle_list_command(self, event):
+        """Handle !list command"""
+        try:
+            groups = db.get_monitored_groups()
+            
+            if not groups:
+                await event.reply("📭 No groups being monitored")
+                return
+            
+            message_lines = ["📋 <b>Monitored Groups:</b>", ""]
+            
+            for i, group in enumerate(groups, 1):
+                title = group['title'][:30] + "..." if len(group['title']) > 30 else group['title']
+                username = f"@{group['username']}" if group['username'] else "No username"
+                date_str = group['added_date'][:10] if group['added_date'] else "Unknown"
+                
+                message_lines.append(f"{i}. <b>{title}</b>")
+                message_lines.append(f"   ID: <code>{group['id']}</code>")
+                message_lines.append(f"   Username: {username}")
+                message_lines.append(f"   Added: {date_str}")
+                message_lines.append("")
+            
+            message = "\n".join(message_lines)
+            
+            # Split if too long
+            if len(message) > 4000:
+                chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+                for chunk in chunks:
+                    await event.reply(chunk, parse_mode='HTML')
+                    await asyncio.sleep(0.5)
+            else:
+                await event.reply(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"List command error: {e}")
+            await event.reply(f"❌ Error: {str(e)}")
+    
+    async def handle_stats_command(self, event):
+        """Handle !stats command"""
+        try:
+            stats = db.get_stats()
+            total_processed = db.get_total_processed()
+            monitored_groups = db.get_monitored_groups()
+            
+            message = f"""📊 <b>Rain Bot Statistics</b>
 
-📋 <b>Steps:</b>
-1. Use /createdbbackup to backup current data
-2. Send the backup ZIP file as a document
-3. Confirm restoration
+<b>Detection:</b>
+• Rains Detected: {stats.get('rains_detected', 0)}
+• Buttons Clicked: {stats.get('buttons_clicked', 0)}
+• Links Joined: {stats.get('links_joined', 0)}
+• Errors: {stats.get('errors', 0)}
 
-❌ <b>What will be restored:</b>
-• All user accounts
-• Swap history  
-• Reports
-• Favorites
+<b>Monitoring:</b>
+• Monitored Groups: {len(monitored_groups)}
+• Messages Processed: {total_processed}
+• Last Updated: {stats.get('last_updated', 'Never')}
 
-💡 <b>Tip:</b> Use this before updating bot code to preserve data.
+<b>System:</b>
+• Uptime: {int(time.time() - self.start_time)}s
+• Auto-Click: {'✅ ON' if AUTO_CLICK_BUTTONS else '❌ OFF'}
+• Auto-Join: {'✅ ON' if AUTO_JOIN_LINKS else '❌ OFF'}"""
+            
+            await event.reply(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"Stats command error: {e}")
+            await event.reply(f"❌ Error: {str(e)}")
+    
+    async def handle_help_command(self, event):
+        """Handle !help command"""
+        help_text = """🤖 <b>Rain Selfbot Commands</b>
 
-📎 <b>Please send the backup ZIP file now...</b>"""
-    
-    backup_restore_data[message.chat.id] = {
-        'waiting_for_backup': True,
-        'backup_data': None,
-        'restore_info': None
-    }
-    
-    bot.reply_to(message, restore_text, parse_mode='HTML')
+<b>Group Management:</b>
+<code>!add &lt;id|@username|link&gt;</code> - Add group to monitoring
+<code>!remove &lt;group_id&gt;</code> - Remove group from monitoring
+<code>!list</code> - List all monitored groups
 
-@bot.message_handler(content_types=['document'])
-def handle_document(message):
-    """Handle document uploads (for restore)"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if user_id != ADMIN_ID or chat_id not in backup_restore_data:
-        return
-    
-    if not backup_restore_data[chat_id].get('waiting_for_backup'):
-        return
-    
-    file_info = bot.get_file(message.document.file_id)
-    file_name = message.document.file_name or 'backup.zip'
-    
-    if not file_name.endswith('.zip'):
-        bot.reply_to(message, "❌ Please send a ZIP file (.zip extension)")
-        backup_restore_data.pop(chat_id, None)
-        return
-    
-    bot.reply_to(message, "📥 Downloading backup file...")
-    
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-    response = requests.get(file_url, timeout=30)
-    
-    if response.status_code != 200:
-        bot.reply_to(message, "❌ Failed to download file")
-        backup_restore_data.pop(chat_id, None)
-        return
-    
-    backup_data = response.content
-    
-    bot.reply_to(message, "🔍 Validating backup file...")
-    
-    success, info = restore_database_from_backup(backup_data)
-    
-    if success:
-        backup_restore_data[chat_id] = {
-            'waiting_for_backup': False,
-            'backup_data': backup_data,
-            'restore_info': info
-        }
-        
-        confirm_text = f"""✅ <b>Backup Validated!</b>
+<b>Bot Control:</b>
+<code>!stats</code> - Show bot statistics
+<code>!help</code> - Show this help
+<code>!ping</code> - Check if bot is alive
 
-{info}
+<b>Examples:</b>
+<code>!add -1001234567890</code>
+<code>!add @crypto_rains</code>
+<code>!add https://t.me/cryptogiveaways</code>
+<code>!remove -1001234567890</code>
 
-⚠️ <b>FINAL WARNING:</b> This will replace current database!
-Current data will be lost unless you have a backup."""
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("✅ Confirm Restore", callback_data="confirm_restore_final"),
-            types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_restore")
+<b>Settings (configure in code):</b>
+• Keywords: {keywords_count} patterns
+• Auto-click buttons: {auto_click}
+• Auto-join links: {auto_join}
+• Reactions: {reactions}""".format(
+            keywords_count=len(KEYWORDS),
+            auto_click='✅ ON' if AUTO_CLICK_BUTTONS else '❌ OFF',
+            auto_join='✅ ON' if AUTO_JOIN_LINKS else '❌ OFF',
+            reactions='✅ ON' if SEND_REACTIONS else '❌ OFF'
         )
         
-        bot.reply_to(message, confirm_text, parse_mode='HTML', reply_markup=markup)
-    else:
-        bot.reply_to(message, f"❌ <b>Invalid backup file:</b>\n\n{info}", parse_mode='HTML')
-        backup_restore_data.pop(chat_id, None)
-
-@bot.callback_query_handler(func=lambda call: call.data == "confirm_restore_final")
-def confirm_restore_final_callback(call):
-    """Finalize restore"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
+        await event.reply(help_text, parse_mode='HTML')
     
-    chat_id = call.message.chat.id
-    
-    bot.edit_message_text(
-        "🔄 <b>Restoring database...</b>\n\n⏳ This will take a moment...",
-        chat_id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-    
-    try:
-        init_database()
+    async def handle_ping_command(self, event):
+        """Handle !ping command"""
+        uptime = int(time.time() - self.start_time)
         
-        backup_restore_data.pop(chat_id, None)
+        # Get current status
+        monitored_groups = len(db.get_monitored_groups())
+        stats = db.get_stats()
         
-        bot.edit_message_text(
-            "✅ <b>Database Restore Complete!</b>\n\n🔄 Bot has been restarted with restored data.",
-            chat_id,
-            call.message.message_id,
-            parse_mode='HTML'
-        )
+        message = f"""🏓 <b>Pong!</b>
+
+✅ <b>Bot Status:</b> Running
+⏱️ <b>Uptime:</b> {uptime}s
+📊 <b>Monitored Groups:</b> {monitored_groups}
+🚨 <b>Rains Detected:</b> {stats.get('rains_detected', 0)}
+
+🔄 <b>Last Check:</b> {datetime.now().strftime('%H:%M:%S')}"""
         
-    except Exception as e:
-        bot.edit_message_text(
-            f"❌ <b>Restore Failed!</b>\n\n{str(e)}",
-            chat_id,
-            call.message.message_id,
-            parse_mode='HTML'
-        )
-
-@bot.callback_query_handler(func=lambda call: call.data == "cancel_restore")
-def cancel_restore_callback(call):
-    """Cancel restore"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
+        await event.reply(message, parse_mode='HTML')
     
-    chat_id = call.message.chat.id
-    
-    backup_restore_data.pop(chat_id, None)
-    
-    bot.edit_message_text(
-        "❌ <b>Database restore cancelled.</b>\n\nNo changes were made.",
-        chat_id,
-        call.message.message_id,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_status")
-def admin_status_callback(call):
-    """Admin status callback"""
-    bot_status_command(call.message)
-
-@bot.message_handler(commands=['botstatus'])
-def bot_status_command(message):
-    """Show bot status"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    status_text = f"""🤖 <b>Bot Status Report</b>
-
-🟢 <b>Status:</b> Operational
-📡 <b>Mode:</b> Webhook
-🌐 <b>URL:</b> {WEBHOOK_URL}
-⏰ <b>Uptime:</b> {int(time.time() - start_time)}s
-
-👥 <b>Statistics:</b>
-• Users: {get_total_users()}
-• Active (24h): {get_active_users_count(1)}
-• Total Swaps: {get_total_swaps()}
-• Success Rate: {get_success_rate()}%
-
-📱 <b>Current:</b>
-• Active Sessions: {len(user_sessions)}
-• Active Swaps: {len(active_swaps)}
-• Pending Reports: {len(get_pending_reports())}
-
-💾 <b>Database:</b>
-• Size: {os.path.getsize('face_swap_bot.db') / 1024:.1f} KB if os.path.exists('face_swap_bot.db') else 0
-• Backups: {len([f for f in os.listdir('.') if f.startswith('backup_')])}
-
-🔗 <b>Endpoints:</b>
-• /ping, /ping1, /ping2 - Health checks
-• /stats - Statistics
-• /status - Status page
-• /health/hunter - Detailed health
-• /users/hunter - User data
-• /fixstats - Fix statistics (NEW)"""
-    
-    bot.reply_to(message, status_text, parse_mode='HTML')
-
-@bot.message_handler(commands=['cleanup'])
-def cleanup_command(message):
-    """Clean up old data"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    cleanup_text = """🧹 <b>Data Cleanup</b>
-
-Choose what to clean up:
-
-🔄 <b>Old Swaps</b> - Remove swaps older than 30 days
-🚨 <b>Old Reports</b> - Remove resolved reports older than 7 days
-🗑️ <b>Temporary Files</b> - Clean old result images
-
-⚠️ <b>Warning:</b> Some operations cannot be undone!"""
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔄 Old Swaps", callback_data="cleanup_old_swaps"),
-        types.InlineKeyboardButton("🚨 Old Reports", callback_data="cleanup_old_reports")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🗑️ Temp Files", callback_data="cleanup_temp_files"),
-        types.InlineKeyboardButton("📊 Stats Only", callback_data="cleanup_stats")
-    )
-    
-    bot.reply_to(message, cleanup_text, parse_mode='HTML', reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('cleanup_'))
-def cleanup_callback(call):
-    """Handle cleanup callbacks"""
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Access denied.")
-        return
-    
-    action = call.data.replace('cleanup_', '')
-    
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        if action == 'old_swaps':
-            c.execute("DELETE FROM swaps_history WHERE swap_date < datetime('now', '-30 days')")
-            deleted = c.rowcount
-            
-            conn.commit()
-            conn.close()
-            
-            bot.answer_callback_query(call.id, f"✅ Deleted {deleted} old swaps")
-            bot.send_message(call.message.chat.id, f"🧹 Deleted {deleted} swaps older than 30 days.")
-            
-        elif action == 'old_reports':
-            c.execute("DELETE FROM reports WHERE status = 'resolved' AND report_date < datetime('now', '-7 days')")
-            deleted = c.rowcount
-            
-            conn.commit()
-            conn.close()
-            
-            bot.answer_callback_query(call.id, f"✅ Deleted {deleted} old reports")
-            bot.send_message(call.message.chat.id, f"🧹 Deleted {deleted} resolved reports older than 7 days.")
-            
-        elif action == 'temp_files':
-            import glob
-            result_files = glob.glob('results/*.png')
-            old_files = []
-            
-            for file in result_files:
-                file_age = time.time() - os.path.getmtime(file)
-                if file_age > 86400 * 7:
-                    os.remove(file)
-                    old_files.append(file)
-            
-            bot.answer_callback_query(call.id, f"✅ Cleaned {len(old_files)} temp files")
-            bot.send_message(call.message.chat.id, f"🗑️ Cleaned {len(old_files)} temporary files older than 7 days.")
-            
-        elif action == 'stats':
-            c.execute("SELECT COUNT(*) FROM swaps_history WHERE swap_date < datetime('now', '-30 days')")
-            old_swaps = c.fetchone()[0]
-            
-            c.execute("SELECT COUNT(*) FROM reports WHERE status = 'resolved' AND report_date < datetime('now', '-7 days')")
-            old_reports = c.fetchone()[0]
-            
-            conn.close()
-            
-            import glob
-            result_files = glob.glob('results/*.png')
-            old_files_count = 0
-            for file in result_files:
-                file_age = time.time() - os.path.getmtime(file)
-                if file_age > 86400 * 7:
-                    old_files_count += 1
-            
-            stats_text = f"""📊 <b>Cleanup Statistics</b>
-
-🔄 Old Swaps (30+ days): {old_swaps}
-🚨 Old Reports (7+ days): {old_reports}
-🗑️ Old Files (7+ days): {old_files_count}
-
-💡 <b>Note:</b> These items can be cleaned up."""
-            
-            bot.answer_callback_query(call.id, "📊 Stats loaded")
-            bot.send_message(call.message.chat.id, stats_text, parse_mode='HTML')
-            
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
-        bot.answer_callback_query(call.id, "❌ Cleanup failed")
+    async def stop(self):
+        """Stop the selfbot"""
+        self.is_running = False
+        if self.client:
+            await self.client.disconnect()
+        logger.info("Selfbot stopped")
 
 # ========== FLASK ROUTES ==========
-HTML_TEMPLATE = '''<!DOCTYPE html>
+@app.route('/')
+def home():
+    """Home page"""
+    stats = db.get_stats()
+    
+    html = """<!DOCTYPE html>
 <html>
 <head>
-    <title>Face Swap Bot</title>
+    <title>Telegram Rain Selfbot</title>
     <style>
         body {
             font-family: Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             margin: 0;
             padding: 20px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
             min-height: 100vh;
         }
         .container {
+            max-width: 800px;
+            margin: 0 auto;
             background: white;
             border-radius: 20px;
             padding: 40px;
-            max-width: 600px;
-            width: 100%;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
         h1 {
@@ -2592,36 +1079,43 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-weight: bold;
             margin-bottom: 20px;
         }
-        .stats {
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
             background: #f8f9fa;
             border-radius: 10px;
             padding: 20px;
-            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        .stat-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 10px 0;
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+            margin: 10px 0;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .groups-list {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .group-item {
+            padding: 10px;
             border-bottom: 1px solid #e0e0e0;
         }
-        .stat-item:last-child {
+        .group-item:last-child {
             border-bottom: none;
-        }
-        .label {
-            font-weight: 600;
-            color: #555;
-        }
-        .value {
-            color: #667eea;
-            font-weight: 700;
-        }
-        .backup-warning {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
-            border-radius: 10px;
-            padding: 15px;
-            margin: 20px 0;
-            color: #856404;
         }
         .footer {
             text-align: center;
@@ -2633,85 +1127,147 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Face Swap Bot v3.5</h1>
-        <div class="status">{{ status }}</div>
-        <div class="stats">
-            <div class="stat-item">
-                <span class="label">Total Users</span>
-                <span class="value">{{ total_users }}</span>
+        <h1>🤖 Telegram Rain Selfbot</h1>
+        <div class="status">🟢 ONLINE</div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Rains Detected</div>
+                <div class="stat-number">{rains_detected}</div>
             </div>
-            <div class="stat-item">
-                <span class="label">Active (24h)</span>
-                <span class="value">{{ active_24h }}</span>
+            <div class="stat-card">
+                <div class="stat-label">Buttons Clicked</div>
+                <div class="stat-number">{buttons_clicked}</div>
             </div>
-            <div class="stat-item">
-                <span class="label">Total Swaps</span>
-                <span class="value">{{ total_swaps }}</span>
+            <div class="stat-card">
+                <div class="stat-label">Links Joined</div>
+                <div class="stat-number">{links_joined}</div>
             </div>
-            <div class="stat-item">
-                <span class="label">Success Rate</span>
-                <span class="value">{{ success_rate }}%</span>
-            </div>
-            <div class="stat-item">
-                <span class="label">Active Sessions</span>
-                <span class="value">{{ active_sessions }}</span>
+            <div class="stat-card">
+                <div class="stat-label">Monitored Groups</div>
+                <div class="stat-number">{monitored_groups}</div>
             </div>
         </div>
-        <div class="backup-warning">
-            ⚠️ <b>Important:</b> Always create backup before updating code!
-            Use /createdbbackup in Telegram bot.
+        
+        <h3>📋 Monitored Groups</h3>
+        <div class="groups-list">
+            {groups_list}
         </div>
+        
         <div class="footer">
-            <p>Created by @VINITOG | Admin: {{ admin_id }}</p>
-            <p>Server Time: {{ server_time }} | Uptime: {{ uptime }}</p>
-            <p>Endpoints: /health/hunter • /stats • /status • /ping • /ping1 • /ping2</p>
+            <p>🚀 Running on Koyeb | Admin: {admin_id}</p>
+            <p>🕒 Last Updated: {last_updated} | Uptime: {uptime}s</p>
+            <p>🔗 Endpoints: /ping, /stats, /status, /health</p>
         </div>
     </div>
 </body>
-</html>'''
+</html>"""
+    
+    # Get monitored groups
+    groups = db.get_monitored_groups()
+    groups_list_html = ""
+    for group in groups[:10]:  # Show first 10
+        title = group['title'][:30] + "..." if len(group['title']) > 30 else group['title']
+        groups_list_html += f'<div class="group-item">📱 {title} (ID: {group["id"]})</div>'
+    
+    if not groups_list_html:
+        groups_list_html = '<div class="group-item">No groups being monitored</div>'
+    
+    return html.format(
+        rains_detected=stats.get('rains_detected', 0),
+        buttons_clicked=stats.get('buttons_clicked', 0),
+        links_joined=stats.get('links_joined', 0),
+        monitored_groups=len(groups),
+        groups_list=groups_list_html,
+        admin_id=ADMIN_ID,
+        last_updated=stats.get('last_updated', 'Never'),
+        uptime=int(time.time() - bot_instance.start_time) if 'bot_instance' in globals() else 0
+    )
 
-@app.route('/')
-def home():
-    """Main dashboard page"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history')
-        total_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-        success_swaps = c.fetchone()[0] or 0
-        
-        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
-        conn.close()
-        
-        return render_template_string(
-            HTML_TEMPLATE,
-            status="🟢 ONLINE",
-            total_users=get_total_users(),
-            active_24h=get_active_users_count(1),
-            total_swaps=total_swaps,
-            success_rate=success_rate,
-            active_sessions=len(user_sessions),
-            admin_id=ADMIN_ID,
-            server_time=datetime.now().strftime('%H:%M:%S'),
-            uptime=f"{int(time.time() - start_time)}s"
-        )
-    except Exception as e:
-        logger.error(f"Home page error: {e}")
-        return render_template_string(
-            HTML_TEMPLATE,
-            status="🟡 OFFLINE",
-            total_users=0,
-            active_24h=0,
-            total_swaps=0,
-            success_rate=0,
-            active_sessions=0,
-            admin_id=ADMIN_ID,
-            server_time=datetime.now().strftime('%H:%M:%S'),
-            uptime="N/A"
-        )
+@app.route('/ping')
+def ping():
+    """Ping endpoint"""
+    return jsonify({
+        "status": "pong",
+        "service": "Telegram Rain Selfbot",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Bot is running on Koyeb"
+    })
+
+@app.route('/ping1')
+def ping():
+    """Ping endpoint"""
+    return jsonify({
+        "status": "pong",
+        "service": "Telegram Rain Selfbot",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Bot is running on Koyeb"
+    })
+
+@app.route('/ping2')
+def ping():
+    """Ping endpoint"""
+    return jsonify({
+        "status": "pong",
+        "service": "Telegram Rain Selfbot",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Bot is running on Koyeb"
+    })
+    
+    
+
+@app.route('/stats')
+def stats_endpoint():
+    """Statistics endpoint"""
+    stats = db.get_stats()
+    groups = db.get_monitored_groups()
+    
+    return jsonify({
+        "status": "online",
+        "service": "Telegram Rain Selfbot",
+        "statistics": {
+            "rains_detected": stats.get('rains_detected', 0),
+            "buttons_clicked": stats.get('buttons_clicked', 0),
+            "links_joined": stats.get('links_joined', 0),
+            "errors": stats.get('errors', 0),
+            "monitored_groups": len(groups),
+            "messages_processed": db.get_total_processed(),
+            "last_updated": stats.get('last_updated', 'Never')
+        },
+        "settings": {
+            "auto_click": AUTO_CLICK_BUTTONS,
+            "auto_join": AUTO_JOIN_LINKS,
+            "send_reactions": SEND_REACTIONS,
+            "keywords_count": len(KEYWORDS),
+            "button_patterns": len(CLICKABLE_BUTTON_TEXTS)
+        },
+        "uptime": int(time.time() - bot_instance.start_time) if 'bot_instance' in globals() else 0
+    })
+
+@app.route('/status')
+def status():
+    """Status endpoint"""
+    is_running = 'bot_instance' in globals() and bot_instance.is_running
+    
+    return jsonify({
+        "status": "online" if is_running else "offline",
+        "bot_running": is_running,
+        "timestamp": datetime.now().isoformat(),
+        "admin_id": ADMIN_ID,
+        "monitored_groups": len(db.get_monitored_groups()),
+        "endpoints": ["/", "/ping", "/stats", "/status", "/health"]
+    })
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "database": "connected",
+        "session_valid": SESSION_STRING != "",
+        "monitoring_active": len(db.get_monitored_groups()) > 0,
+        "timestamp": datetime.now().isoformat()
+    })
 
 @app.route('/health/hunter')
 def health_hunter():
@@ -2732,416 +1288,106 @@ def health_hunter():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/ping')
-def ping():
-    """Simple ping endpoint"""
-    return jsonify({
-        "status": "pong",
-        "service": "Face Swap Bot",
-        "timestamp": datetime.now().isoformat(),
-        "message": "Bot is running on Koyeb",
-        "endpoint": "/ping"
-    })
 
-@app.route('/ping1')
-def ping1():
-    """Ping endpoint 1"""
-    return jsonify({
-        "status": "pong",
-        "service": "Face Swap Bot",
-        "timestamp": datetime.now().isoformat(),
-        "message": "Bot is alive and healthy",
-        "endpoint": "/ping1",
-        "uptime": int(time.time() - start_time)
-    })
-
-@app.route('/ping2')
-def ping2():
-    """Ping endpoint 2"""
-    return jsonify({
-        "status": "pong",
-        "service": "Face Swap Bot",
-        "timestamp": datetime.now().isoformat(),
-        "message": "All systems operational",
-        "endpoint": "/ping2",
-        "bot": "@CarnageJackingBizMetaBot"
-    })
-
-@app.route('/stats')
-def stats():
-    """Public statistics endpoint"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history')
-        total_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-        success_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "failed"')
-        failed_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM reports WHERE status = "pending"')
-        pending_reports = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM favorites')
-        total_favorites = c.fetchone()[0] or 0
-        
-        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 2)
-        
-        conn.close()
-        
-        stats_data = {
-            "status": "online",
-            "service": "Face Swap Bot",
-            "version": "3.5",
-            "statistics": {
-                "users": {
-                    "total": get_total_users(),
-                    "active_24h": get_active_users_count(1),
-                    "banned": len(BANNED_USERS)
-                },
-                "swaps": {
-                    "total": total_swaps,
-                    "successful": success_swaps,
-                    "failed": failed_swaps,
-                    "success_rate": success_rate,
-                    "active": len(active_swaps)
-                },
-                "engagement": {
-                    "favorites": total_favorites,
-                    "pending_reports": pending_reports
-                }
-            },
-            "performance": {
-                "active_sessions": len(user_sessions),
-                "uptime": int(time.time() - start_time),
-                "server_time": datetime.now().isoformat()
-            }
-        }
-        
-        return jsonify(stats_data), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/status')
-def status_page():
-    """Public status page"""
-    try:
-        return jsonify({
-            "status": "online",
-            "bot": "@CarnageJackingBizMetaBot",
-            "service": "Face Swap Bot",
-            "version": "3.5",
-            "timestamp": datetime.now().isoformat(),
-            "users": get_total_users(),
-            "active_sessions": len(user_sessions),
-            "uptime": int(time.time() - start_time),
-            "endpoints": {
-                "health": "/health/hunter",
-                "stats": "/stats",
-                "users": "/users/hunter",
-                "ping": ["/ping", "/ping1", "/ping2"],
-                "status": "/status",
-                "dashboard": "/"
-            }
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/summary')
-def summary():
-    """Summary endpoint for monitoring dashboards"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history')
-        total_swaps = c.fetchone()[0] or 0
-        
-        c.execute('SELECT COUNT(*) FROM swaps_history WHERE status = "success"')
-        success_swaps = c.fetchone()[0] or 0
-        
-        success_rate = round((success_swaps / max(1, total_swaps)) * 100, 1)
-        conn.close()
-        
-        summary_data = {
-            "status": "online",
-            "bot_name": "Face Swap Bot",
-            "bot_username": "@CarnageJackingBizMetaBot",
-            "total_users": get_total_users(),
-            "total_swaps": total_swaps,
-            "success_rate": f"{success_rate}%",
-            "active_sessions": len(user_sessions),
-            "uptime_days": int((time.time() - start_time) / 86400),
-            "last_updated": datetime.now().isoformat()
-        }
-        
-        return jsonify(summary_data), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/status/page')
-def status_html():
-    """HTML status page for quick checks"""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Face Swap Bot Status</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                margin: 40px;
-                background: #f5f5f5;
-            }
-            .container {
-                max-width: 800px;
-                margin: 0 auto;
-                background: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            .status {
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-                display: inline-block;
-            }
-            .online { background: #d4edda; color: #155724; }
-            .offline { background: #f8d7da; color: #721c24; }
-            .metric {
-                background: #f8f9fa;
-                padding: 15px;
-                margin: 10px 0;
-                border-radius: 5px;
-                border-left: 4px solid #007bff;
-            }
-            .endpoint {
-                font-family: monospace;
-                background: #e9ecef;
-                padding: 5px 10px;
-                border-radius: 3px;
-                margin: 5px 0;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 Face Swap Bot Status</h1>
-            
-            <div class="status online">🟢 ONLINE</div>
-            
-            <div class="metric">
-                <h3>📊 Basic Info</h3>
-                <p><strong>Bot:</strong> @CarnageJackingBizMetaBot</p>
-                <p><strong>Version:</strong> 3.5</p>
-                <p><strong>Uptime:</strong> {{ uptime }} seconds</p>
-                <p><strong>Server Time:</strong> {{ server_time }}</p>
-            </div>
-            
-            <div class="metric">
-                <h3>👥 Users</h3>
-                <p><strong>Total Users:</strong> {{ total_users }}</p>
-                <p><strong>Active Sessions:</strong> {{ active_sessions }}</p>
-                <p><strong>Banned Users:</strong> {{ banned_users }}</p>
-            </div>
-            
-            <div class="metric">
-                <h3>🔗 Endpoints</h3>
-                <div class="endpoint">GET /ping</div>
-                <div class="endpoint">GET /ping1</div>
-                <div class="endpoint">GET /ping2</div>
-                <div class="endpoint">GET /stats</div>
-                <div class="endpoint">GET /status</div>
-                <div class="endpoint">GET /health/hunter</div>
-                <div class="endpoint">GET /summary</div>
-            </div>
-            
-            <div class="metric">
-                <h3>📞 Monitoring</h3>
-                <p>This page auto-refreshes every 60 seconds for monitoring.</p>
-                <p><strong>Created:</strong> {{ created_time }}</p>
-            </div>
-        </div>
-        
-        <script>
-            setTimeout(() => {
-                location.reload();
-            }, 60000);
-            
-            function updateTime() {
-                const now = new Date();
-                document.querySelectorAll('.server-time').forEach(el => {
-                    el.textContent = now.toLocaleString();
-                });
-            }
-            setInterval(updateTime, 1000);
-        </script>
-    </body>
-    </html>
-    """
+# ========== MAIN ASYNC FUNCTION ==========
+async def main_async():
+    """Main async function"""
+    global bot_instance
     
-    return render_template_string(
-        html,
-        uptime=int(time.time() - start_time),
-        server_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        total_users=get_total_users(),
-        active_sessions=len(user_sessions),
-        banned_users=len(BANNED_USERS),
-        created_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    )
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Telegram webhook endpoint"""
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        
-        bot.process_new_updates([update])
-        
-        return '', 200
+    print("=" * 70)
+    print("🚀 Starting Telegram Rain Selfbot...")
+    print("=" * 70)
     
-    return 'Bad request', 400
-
-# ========== DEFAULT HANDLER ==========
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    """Handle all other messages"""
-    chat_id = message.chat.id
+    # Check session string
+    if not SESSION_STRING or SESSION_STRING == "YOUR_SESSION_STRING_HERE":
+        print("❌ ERROR: TELEGRAM_SESSION_STRING not set in environment!")
+        print("\nTo get your session string:")
+        print("1. Run: python session_generator.py")
+        print("2. Copy the generated session string")
+        print("3. Set it as TELEGRAM_SESSION_STRING environment variable")
+        print("4. Restart the application")
+        print("=" * 70)
+        return
     
-    if chat_id in user_sessions:
-        state = user_sessions[chat_id].get('state')
-        
-        if state == STATE_WAITING_SOURCE:
-            bot.reply_to(message, "📸 Please send the SOURCE photo to start the swap.")
-        elif state == STATE_WAITING_TARGET:
-            bot.reply_to(message, "📸 Please send the TARGET photo to complete the swap.")
-        elif state == STATE_PROCESSING:
-            bot.reply_to(message, "⏳ Your swap is being processed. Please wait...")
-        else:
-            bot.reply_to(message, "🔄 Please use /swap to start a new face swap.")
-    else:
-        help_text = """🤖 <b>Face Swap Bot v3.5</b>
-
-I can help you swap faces between photos!
-
-🎭 <b>Main Commands:</b>
-/start - Start the bot
-/swap - Start a new face swap
-/mystats - View your statistics
-/favorites - View saved swaps
-/history - View swap history
-/cancel - Cancel current swap
-/report - Report content
-/help - Show help
-
-💡 <b>Tip:</b> Use clear, front-facing photos for best results!"""
-        
-        bot.reply_to(message, help_text, parse_mode='HTML')
-
-# ========== MAIN FUNCTION ==========
-def setup_webhook():
-    """Setup webhook for Telegram bot"""
+    # Initialize bot
+    bot_instance = TelegramRainBot(SESSION_STRING)
+    
+    # Start bot
+    success = await bot_instance.start()
+    
+    if not success:
+        print("❌ Failed to start bot!")
+        return
+    
+    print("✅ Bot started successfully!")
+    print("🌐 Web server running on port:", WEB_PORT)
+    print("=" * 70)
+    print("📋 Available Commands (in private chat with yourself):")
+    print("  !add <id|@username|link>  - Add group to monitor")
+    print("  !remove <group_id>         - Remove group")
+    print("  !list                      - List monitored groups")
+    print("  !stats                     - Show statistics")
+    print("  !help                      - Show help")
+    print("  !ping                      - Check if bot is alive")
+    print("=" * 70)
+    print("🌐 Web Endpoints:")
+    print(f"  http://localhost:{WEB_PORT}/       - Dashboard")
+    print(f"  http://localhost:{WEB_PORT}/ping   - Ping")
+    print(f"  http://localhost:{WEB_PORT}/stats  - Statistics")
+    print(f"  http://localhost:{WEB_PORT}/status - Status")
+    print("=" * 70)
+    
+    # Keep running
     try:
-        bot.remove_webhook()
-        time.sleep(1)
-        
-        webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        bot.set_webhook(url=webhook_url)
-        
-        logger.info(f"Webhook set to: {webhook_url}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to setup webhook: {e}")
-        return False
+        while bot_instance.is_running:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping bot...")
+    finally:
+        await bot_instance.stop()
+        print("👋 Bot stopped.")
 
+# ========== FLASK RUNNER ==========
 def run_flask():
-    """Run the Flask web server"""
-    logger.info(f"Starting Flask server on port {BOT_PORT}...")
-    
+    """Run Flask web server"""
+    print(f"🌐 Starting Flask server on port {WEB_PORT}...")
     app.run(
         host='0.0.0.0',
-        port=BOT_PORT,
+        port=WEB_PORT,
         debug=False,
         use_reloader=False,
         threaded=True
     )
 
+# ========== MAIN ENTRY POINT ==========
 def main():
-    """Main application entry point"""
-    global start_time
-    start_time = time.time()
-    
-    print("=" * 80)
-    print("🤖 FACE SWAP BOT v3.5 - PRODUCTION READY")
-    print("=" * 80)
-    print(f"👑 Admin ID: {ADMIN_ID}")
-    print(f"📢 Required Channel: {REQUIRED_CHANNEL}")
-    print(f"🌐 Webhook URL: {WEBHOOK_URL}")
-    print(f"🚀 Bot Port: {BOT_PORT}")
-    print("=" * 80)
-    print("✨ COMPLETE FEATURES:")
-    print("• Face swapping with DeepSwapper API")
-    print("• Admin notifications for new users")
-    print("• Report system with admin review")
-    print("• Complete admin panel with inline buttons")
-    print("• Database backup/restore system")
-    print("• Broadcast messaging to all users")
-    print("• User statistics and history")
-    print("• Multiple ping endpoints for 24/7 uptime")
-    print("• Web dashboard with real-time stats")
-    print("• Data cleanup tools")
-    print("• FIXED: Swap statistics now properly stored!")
-    print("=" * 80)
-    print("🔧 STATISTICS FIXES APPLIED:")
-    print("1. update_user_stats() - Properly increments counters")
-    print("2. add_swap_history() - Always called with correct status")
-    print("3. New /fixstats command to fix existing data")
-    print("4. Verification between users and swaps_history tables")
-    print("=" * 80)
-    print("💾 BACKUP SYSTEM:")
-    print("1. /createdbbackup - Create backup before updates")
-    print("2. Save the ZIP file sent by bot")
-    print("3. Update your code")
-    print("4. /restoredb - Upload and restore data")
-    print("=" * 80)
-    
-    init_database()
-    
-    try:
-        bot_info = bot.get_me()
-        print(f"✅ Bot connected: @{bot_info.username} (ID: {bot_info.id})")
-    except Exception as e:
-        print(f"❌ Bot connection error: {e}")
+    """Main entry point"""
+    # Check if we should generate session
+    if len(sys.argv) > 1 and sys.argv[1] == "--generate-session":
+        from session_generator import generate_session
+        asyncio.run(generate_session())
         return
     
-    print(f"🌐 Setting up webhook...")
-    if setup_webhook():
-        print("✅ Webhook configured successfully")
-        print(f"🚀 Starting web server on port {BOT_PORT}...")
-        print("=" * 80)
-        print("🔗 Available Endpoints:")
-        print(f"• https://{WEBHOOK_URL.replace('https://', '')}/ - Dashboard")
-        print(f"• https://{WEBHOOK_URL.replace('https://', '')}/ping - Ping")
-        print(f"• https://{WEBHOOK_URL.replace('https://', '')}/stats - Statistics")
-        print(f"• https://{WEBHOOK_URL.replace('https://', '')}/status - Status")
-        print(f"• https://{WEBHOOK_URL.replace('https://', '')}/health/hunter - Health")
-        print("=" * 80)
-        run_flask()
-    else:
-        print("❌ Webhook setup failed!")
-
-if __name__ == '__main__':
+    # Create asyncio event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Run both Flask and Telegram bot
     try:
-        main()
+        # Start Flask in a separate thread
+        import threading
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Run Telegram bot
+        loop.run_until_complete(main_async())
+        
     except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-        sys.exit(0)
+        print("\n👋 Application stopped by user")
     except Exception as e:
         print(f"❌ Fatal error: {e}")
-        sys.exit(1)
+    finally:
+        loop.close()
+
+if __name__ == '__main__':
+    main()
