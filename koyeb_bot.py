@@ -1195,7 +1195,7 @@ def ping():
     })
 
 @app.route('/ping1')
-def ping():
+def ping1():
     """Ping endpoint"""
     return jsonify({
         "status": "pong",
@@ -1205,7 +1205,7 @@ def ping():
     })
 
 @app.route('/ping2')
-def ping():
+def ping2():
     """Ping endpoint"""
     return jsonify({
         "status": "pong",
